@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a multi-tenant TURN credential issuance service (Spring Boot MVC, Java 21 virtual threads) plus the coturn/Postgres/Redis infra it depends on, deployable as a per-region Docker stack.
+**Goal:** Build a multi-tenant TURN credential issuance service (Spring Boot MVC, Java 21 virtual threads) plus the coturn/Postgres/Redis infra it depends on, deployable as a single-DC, highly-available Docker stack (no multi-region/multi-DC).
 
-**Architecture:** Stateless Spring Boot MVC service signs TURN REST API credentials (HMAC-SHA1) using a per-tenant secret stored in Postgres. Redis provides per-tenant rate limiting only. Coturn reads the same `turn_secret` table directly via `psql-userdb` to validate connections without calling back to the app.
+**Architecture:** Stateless Spring Boot MVC service signs TURN REST API credentials (HMAC-SHA1) using a per-tenant secret stored in a 3-node Patroni-managed Postgres HA cluster (local etcd for consensus, HAProxy/PgBouncer routing to the current leader). Redis provides per-tenant rate limiting only. Coturn reads the same `turn_secret` table directly via `psql-userdb` (through the same HAProxy/PgBouncer endpoint) to validate connections without calling back to the app.
 
-**Tech Stack:** Java 21 (virtual threads via `spring.threads.virtual.enabled`), Spring Boot 3.3 (MVC, Data JPA, Validation, Actuator), PostgreSQL 16 + Flyway, Redis 7 (Lettuce client), coturn (latest stable, `psql-userdb`), Maven, JUnit 5 + Testcontainers, Docker Compose.
+**Tech Stack:** Java 21 (virtual threads via `spring.threads.virtual.enabled`), Spring Boot 3.3 (MVC, Data JPA, Validation, Actuator), PostgreSQL 16 + Patroni + etcd + Flyway, HAProxy/PgBouncer, Redis 7 (Lettuce client), coturn (latest stable, `psql-userdb`), Maven, JUnit 5 + Testcontainers, Docker Compose.
 
 **Spec:** `docs/superpowers/specs/2026-08-20-turn-credential-platform-design.md`
 
@@ -28,8 +28,10 @@
 turn-credential-platform/
 ├── pom.xml
 ├── docker-compose.yml                  # local dev: postgres, redis, coturn, app
-├── docker-compose.prod.yml             # single-region reference topology
+├── docker-compose.prod.yml             # single-DC Patroni HA topology
 ├── coturn/turnserver.conf
+├── patroni/patroni.yml
+├── haproxy/haproxy.cfg
 ├── src/main/java/com/k2iot/turncred/
 │   ├── TurnCredentialPlatformApplication.java
 │   ├── config/VirtualThreadConfig.java
@@ -333,7 +335,6 @@ CREATE TABLE credential_issuance_log (
     id          BIGSERIAL PRIMARY KEY,
     tenant_id   UUID NOT NULL REFERENCES tenants(id),
     user_id     VARCHAR(255) NOT NULL,
-    region      VARCHAR(50)  NOT NULL,
     issued_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     ttl_sec     INT NOT NULL
 );
@@ -1051,7 +1052,7 @@ git commit -m "feat: add tenant API-key authentication interceptor"
 
 **Interfaces:**
 - Consumes: `TurnSecretRepository.findByRealm` (Task 3), `HmacSigner.sign` (Task 4), `RedisRateLimiter.tryAcquire` (Task 5).
-- Produces: `TurnCredentialService.issueCredential(Tenant tenant, String userId, String region): TurnCredential` — consumed by Task 8.
+- Produces: `TurnCredentialService.issueCredential(Tenant tenant, String userId): TurnCredential` — consumed by Task 8.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1099,7 +1100,7 @@ class TurnCredentialServiceTest {
         when(rateLimiter.tryAcquire(tenant.getId(), 600)).thenReturn(true);
         when(secretRepository.findByRealm(tenant.getRealm())).thenReturn(Optional.of(secret));
 
-        TurnCredential credential = service.issueCredential(tenant, "user-42", "ap-southeast");
+        TurnCredential credential = service.issueCredential(tenant, "user-42");
 
         assertThat(credential.username()).endsWith(":user-42");
         assertThat(credential.password()).isEqualTo(new HmacSigner().sign("super-secret", credential.username()));
@@ -1112,7 +1113,7 @@ class TurnCredentialServiceTest {
         Tenant tenant = tenantWithRealm("acme.turn.yourplatform.com");
         when(rateLimiter.tryAcquire(tenant.getId(), 600)).thenReturn(false);
 
-        assertThatThrownBy(() -> service.issueCredential(tenant, "user-42", "ap-southeast"))
+        assertThatThrownBy(() -> service.issueCredential(tenant, "user-42"))
                 .isInstanceOf(RateLimitExceededException.class);
     }
 
@@ -1122,7 +1123,7 @@ class TurnCredentialServiceTest {
         when(rateLimiter.tryAcquire(tenant.getId(), 600)).thenReturn(true);
         when(secretRepository.findByRealm(tenant.getRealm())).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> service.issueCredential(tenant, "user-42", "ap-southeast"))
+        assertThatThrownBy(() -> service.issueCredential(tenant, "user-42"))
                 .isInstanceOf(IllegalStateException.class);
     }
 }
@@ -1176,9 +1177,6 @@ public class CredentialIssuanceLog {
     @Column(name = "user_id", nullable = false)
     private String userId;
 
-    @Column(nullable = false)
-    private String region;
-
     @Column(name = "issued_at", nullable = false)
     private Instant issuedAt = Instant.now();
 
@@ -1187,10 +1185,9 @@ public class CredentialIssuanceLog {
 
     public CredentialIssuanceLog() {}
 
-    public CredentialIssuanceLog(UUID tenantId, String userId, String region, int ttlSec) {
+    public CredentialIssuanceLog(UUID tenantId, String userId, int ttlSec) {
         this.tenantId = tenantId;
         this.userId = userId;
-        this.region = region;
         this.ttlSec = ttlSec;
     }
 }
@@ -1234,7 +1231,7 @@ public class TurnCredentialService {
         this.signer = signer;
     }
 
-    public TurnCredential issueCredential(Tenant tenant, String userId, String region) {
+    public TurnCredential issueCredential(Tenant tenant, String userId) {
         if (!rateLimiter.tryAcquire(tenant.getId(), tenant.getRateLimitPerMin())) {
             throw new RateLimitExceededException(tenant.getId());
         }
@@ -1246,7 +1243,7 @@ public class TurnCredentialService {
         String username = expiry + ":" + userId;
         String password = signer.sign(secret.getValue(), username);
 
-        logRepository.save(new CredentialIssuanceLog(tenant.getId(), userId, region, tenant.getCredentialTtlSec()));
+        logRepository.save(new CredentialIssuanceLog(tenant.getId(), userId, tenant.getCredentialTtlSec()));
 
         List<String> uris = List.of(
                 "turn:" + tenant.getRealm() + ":3478?transport=udp",
@@ -1331,7 +1328,7 @@ class TurnCredentialControllerTest {
         TurnCredential credential = new TurnCredential(
                 "1755700000:user-42", "signed-password", 3600,
                 List.of("turn:acme.turn.yourplatform.com:3478?transport=udp"));
-        when(credentialService.issueCredential(eq(tenant), anyString(), anyString())).thenReturn(credential);
+        when(credentialService.issueCredential(eq(tenant), anyString())).thenReturn(credential);
 
         mockMvc.perform(post("/v1/turn-credentials")
                         .contentType("application/json")
@@ -1347,7 +1344,7 @@ class TurnCredentialControllerTest {
         tenant.setId(UUID.randomUUID());
         CurrentTenantHolder.set(tenant);
 
-        when(credentialService.issueCredential(eq(tenant), anyString(), anyString()))
+        when(credentialService.issueCredential(eq(tenant), anyString()))
                 .thenThrow(new RateLimitExceededException(tenant.getId()));
 
         mockMvc.perform(post("/v1/turn-credentials")
@@ -1385,7 +1382,6 @@ package com.k2iot.turncred.credential;
 import com.k2iot.turncred.auth.CurrentTenantHolder;
 import com.k2iot.turncred.credential.dto.IssueCredentialRequest;
 import com.k2iot.turncred.credential.dto.TurnCredentialResponse;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.UUID;
@@ -1396,9 +1392,6 @@ public class TurnCredentialController {
 
     private final TurnCredentialService credentialService;
 
-    @Value("${turn.region:default}")
-    private String region;
-
     public TurnCredentialController(TurnCredentialService credentialService) {
         this.credentialService = credentialService;
     }
@@ -1408,7 +1401,7 @@ public class TurnCredentialController {
         var tenant = CurrentTenantHolder.get();
         String userId = (request != null && request.userId() != null) ? request.userId() : UUID.randomUUID().toString();
 
-        TurnCredential credential = credentialService.issueCredential(tenant, userId, region);
+        TurnCredential credential = credentialService.issueCredential(tenant, userId);
 
         return new TurnCredentialResponse(credential.username(), credential.password(),
                 credential.ttlSeconds(), credential.uris());
@@ -1896,16 +1889,276 @@ git commit -m "test: add end-to-end tenant creation + credential issuance integr
 
 ---
 
-### Task 12: Structured logging + production Docker Compose reference
+### Task 12: Patroni HA Postgres cluster + HAProxy/PgBouncer (production, single DC)
+
+**Files:**
+- Create: `patroni/patroni.yml`
+- Create: `haproxy/haproxy.cfg`
+- Create: `docker-compose.prod.yml`
+
+**Interfaces:**
+- Consumes: nothing from earlier tasks (pure infra) — application config from Task 1 (`application.yml`) points its `spring.datasource.url` at the HAProxy endpoint this task produces, and `coturn/turnserver.conf`'s `psql-userdb` (Task 10) does the same in production.
+- Produces: a 3-node Patroni-managed Postgres cluster with automatic leader failover (~10-30s), fronted by HAProxy on port 5000 (writes+reads, always routed to the current leader).
+
+- [ ] **Step 1: `patroni/patroni.yml`** (templated per node — `name` and `listen`/`connect_address` differ per node; `${NODE_NAME}` and `${NODE_IP}` are supplied as container env vars in `docker-compose.prod.yml`)
+
+```yaml
+scope: turncred-cluster
+namespace: /turncred/
+name: ${NODE_NAME}
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: ${NODE_IP}:8008
+
+etcd3:
+  hosts: etcd1:2379,etcd2:2379,etcd3:2379
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    synchronous_mode: true
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+        max_connections: 200
+        wal_level: replica
+        hot_standby: "on"
+
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+  pg_hba:
+    - host replication replicator 0.0.0.0/0 md5
+    - host all all 0.0.0.0/0 md5
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: ${NODE_IP}:5432
+  data_dir: /var/lib/postgresql/data
+  authentication:
+    replication:
+      username: replicator
+      password: ${REPLICATOR_PASSWORD}
+    superuser:
+      username: postgres
+      password: ${POSTGRES_SUPERUSER_PASSWORD}
+
+  parameters:
+    unix_socket_directories: "."
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  clonefrom: false
+```
+
+- [ ] **Step 2: `haproxy/haproxy.cfg`** (routes to whichever node's Patroni REST API reports itself as leader)
+
+```
+global
+    maxconn 1000
+
+defaults
+    log global
+    mode tcp
+    retries 2
+    timeout client 30m
+    timeout connect 4s
+    timeout server 30m
+    timeout check 5s
+
+listen postgres_write
+    bind *:5000
+    option httpchk GET /leader
+    http-check expect status 200
+    default-server inter 3s fall 3 rise 2 on-marked-down shutdown-sessions
+    server pg1 pg1:5432 maxconn 200 check port 8008
+    server pg2 pg2:5432 maxconn 200 check port 8008
+    server pg3 pg3:5432 maxconn 200 check port 8008
+```
+
+Patroni's REST API returns HTTP 200 on `/leader` only for the current
+leader node and a non-200 for replicas, so HAProxy's health check
+naturally routes all traffic to whichever node currently holds the
+lock in etcd — no manual reconfiguration needed after a failover.
+
+- [ ] **Step 3: `docker-compose.prod.yml`** (single-DC Patroni HA topology: 3-node etcd, 3-node Patroni/Postgres, HAProxy, Redis, coturn, N app instances)
+
+```yaml
+services:
+  etcd1:
+    image: quay.io/coreos/etcd:v3.5.15
+    command: >
+      etcd --name etcd1
+      --initial-advertise-peer-urls http://etcd1:2380
+      --listen-peer-urls http://0.0.0.0:2380
+      --listen-client-urls http://0.0.0.0:2379
+      --advertise-client-urls http://etcd1:2379
+      --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      --initial-cluster-state new
+    restart: unless-stopped
+
+  etcd2:
+    image: quay.io/coreos/etcd:v3.5.15
+    command: >
+      etcd --name etcd2
+      --initial-advertise-peer-urls http://etcd2:2380
+      --listen-peer-urls http://0.0.0.0:2380
+      --listen-client-urls http://0.0.0.0:2379
+      --advertise-client-urls http://etcd2:2379
+      --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      --initial-cluster-state new
+    restart: unless-stopped
+
+  etcd3:
+    image: quay.io/coreos/etcd:v3.5.15
+    command: >
+      etcd --name etcd3
+      --initial-advertise-peer-urls http://etcd3:2380
+      --listen-peer-urls http://0.0.0.0:2380
+      --listen-client-urls http://0.0.0.0:2379
+      --advertise-client-urls http://etcd3:2379
+      --initial-cluster etcd1=http://etcd1:2380,etcd2=http://etcd2:2380,etcd3=http://etcd3:2380
+      --initial-cluster-state new
+    restart: unless-stopped
+
+  pg1:
+    image: patroni/patroni:latest
+    depends_on: [etcd1, etcd2, etcd3]
+    environment:
+      NODE_NAME: pg1
+      NODE_IP: pg1
+      REPLICATOR_PASSWORD: ${REPLICATOR_PASSWORD}
+      POSTGRES_SUPERUSER_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+    volumes:
+      - ./patroni/patroni.yml:/etc/patroni.yml
+      - pg1data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  pg2:
+    image: patroni/patroni:latest
+    depends_on: [etcd1, etcd2, etcd3]
+    environment:
+      NODE_NAME: pg2
+      NODE_IP: pg2
+      REPLICATOR_PASSWORD: ${REPLICATOR_PASSWORD}
+      POSTGRES_SUPERUSER_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+    volumes:
+      - ./patroni/patroni.yml:/etc/patroni.yml
+      - pg2data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  pg3:
+    image: patroni/patroni:latest
+    depends_on: [etcd1, etcd2, etcd3]
+    environment:
+      NODE_NAME: pg3
+      NODE_IP: pg3
+      REPLICATOR_PASSWORD: ${REPLICATOR_PASSWORD}
+      POSTGRES_SUPERUSER_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD}
+    volumes:
+      - ./patroni/patroni.yml:/etc/patroni.yml
+      - pg3data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  haproxy:
+    image: haproxy:2.9
+    depends_on: [pg1, pg2, pg3]
+    volumes:
+      - ./haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    restart: unless-stopped
+
+  coturn:
+    image: coturn/coturn:4.6
+    depends_on: [haproxy]
+    environment:
+      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP}
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    restart: unless-stopped
+
+  app:
+    image: k2iot/turn-credential-platform:latest
+    depends_on: [haproxy, redis]
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://haproxy:5000/turncred
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_APP_USER}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_APP_PASSWORD}
+      SPRING_DATA_REDIS_HOST: redis
+    ports:
+      - "8080:8080"
+    deploy:
+      replicas: 3
+    restart: unless-stopped
+
+volumes:
+  pg1data:
+  pg2data:
+  pg3data:
+```
+
+- [ ] **Step 4: Update `coturn/turnserver.conf`'s `psql-userdb` for production**
+
+The local-dev version from Task 10 points `psql-userdb` straight at
+the single `postgres` service. In production it must point at the
+HAProxy endpoint instead, so it always talks to the current leader:
+
+```bash
+# in coturn/turnserver.conf, replace the local-dev host with:
+# psql-userdb="host=haproxy port=5000 dbname=turncred user=turncred password=turncred connect_timeout=10"
+```
+Document this as an environment-specific override (e.g. a
+`coturn/turnserver.prod.conf` variant, or a templated conf file) —
+do not overwrite the dev file, since Task 10's `docker-compose.yml`
+still needs the single-node `postgres` host for local development.
+
+- [ ] **Step 5: Verify Patroni failover manually**
+
+Run:
+```bash
+docker compose -f docker-compose.prod.yml up -d
+sleep 20
+curl -s http://localhost:8008/leader  # via pg1's exposed Patroni API, or docker exec into any node
+docker compose -f docker-compose.prod.yml stop pg1   # kill the current leader (adjust to whichever node is leader)
+sleep 30
+curl -s http://haproxy:5000  # (via psql) — confirm writes still succeed against a promoted node
+```
+Expected: a different `pgN` becomes leader within ~30s, HAProxy routes to it automatically, and `mvn test -Dtest=CredentialIssuanceIntegrationTest`-style traffic keeps succeeding through the failover window (a few seconds of connection errors during the actual promotion are expected and acceptable — the app's JDBC pool retries).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add patroni haproxy docker-compose.prod.yml
+git commit -m "feat: add Patroni-managed Postgres HA cluster with HAProxy routing"
+```
+
+---
+
+### Task 13: Structured logging + README
 
 **Files:**
 - Create: `src/main/java/com/k2iot/turncred/logging/RequestLoggingFilter.java`
 - Create: `src/main/resources/logback-spring.xml`
-- Create: `docker-compose.prod.yml`
 - Create: `README.md`
 
 **Interfaces:**
-- Produces: JSON access logs (`tenant_id`, `request_id`, `latency_ms`, `status`) for every request; a documented single-region production topology.
+- Produces: JSON access logs (`tenant_id`, `request_id`, `latency_ms`, `status`) for every request; a documented single-DC production topology.
 
 - [ ] **Step 1: `logback-spring.xml`**
 
@@ -1965,47 +2218,13 @@ public class RequestLoggingFilter implements Filter {
 }
 ```
 
-- [ ] **Step 3: `docker-compose.prod.yml`** (single-region reference; primary vs replica selected via env var)
-
-```yaml
-services:
-  app:
-    image: k2iot/turn-credential-platform:latest
-    environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://${POSTGRES_HOST}:5432/turncred
-      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER}
-      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD}
-      SPRING_DATA_REDIS_HOST: ${REDIS_HOST}
-      TURN_REGION: ${REGION_NAME}
-      # Only the primary region's deployment should set this to true;
-      # all other regions run read-only (admin endpoints return 403 — see README).
-      APP_WRITE_ENABLED: ${WRITE_ENABLED:-false}
-    ports:
-      - "8080:8080"
-    restart: unless-stopped
-
-  coturn:
-    image: coturn/coturn:4.6
-    environment:
-      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP}
-    volumes:
-      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf
-    environment:
-      PSQL_HOST: ${POSTGRES_HOST}
-    ports:
-      - "3478:3478/udp"
-      - "3478:3478/tcp"
-      - "5349:5349/tcp"
-    command: ["-c", "/etc/coturn/turnserver.conf"]
-    restart: unless-stopped
-```
-
-- [ ] **Step 4: `README.md`**
+- [ ] **Step 3: `README.md`**
 
 ```markdown
 # TURN Credential Platform
 
-Multi-tenant TURN REST API credential issuance service.
+Multi-tenant TURN REST API credential issuance service. Single data
+center, highly available within that DC (no multi-region/multi-DC).
 
 ## Local development
     docker compose up -d --build
@@ -2013,32 +2232,39 @@ Multi-tenant TURN REST API credential issuance service.
       -d '{"name":"Acme Corp","realm":"acme.turn.yourplatform.com"}'
 
 ## Production topology
-See `docker-compose.prod.yml`. One Postgres primary (one region) +
-streaming read replicas per other region. Set `APP_WRITE_ENABLED=true`
-only in the primary region's deployment — admin endpoints reject writes
-elsewhere. Spec: `docs/superpowers/specs/2026-08-20-turn-credential-platform-design.md`.
+See `docker-compose.prod.yml`: 3-node etcd + 3-node Patroni-managed
+Postgres (1 leader, 1 sync replica, 1 async replica) + HAProxy routing
+all traffic to the current leader + Redis (rate limiting) + coturn +
+N app instances. Postgres failover is automatic (~10-30s) via
+Patroni/etcd — no manual DNS or config changes needed. Spec:
+`docs/superpowers/specs/2026-08-20-turn-credential-platform-design.md`.
 
 ## Manual coturn verification
     turnutils_uclient -u <username> -w <password> -p 3478 <turn-host>
+
+## Manual failover test
+    docker compose -f docker-compose.prod.yml stop pg1
+    # confirm a different node becomes leader within ~30s and
+    # credential issuance keeps working through haproxy:5000
 ```
 
-- [ ] **Step 5: Run full suite one last time**
+- [ ] **Step 4: Run full suite one last time**
 
 Run: `mvn test`
 Expected: all tests PASS.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add src/main/java/com/k2iot/turncred/logging src/main/resources/logback-spring.xml docker-compose.prod.yml README.md
-git commit -m "feat: add structured JSON logging and production Compose reference"
+git add src/main/java/com/k2iot/turncred/logging src/main/resources/logback-spring.xml README.md
+git commit -m "feat: add structured JSON logging and project README"
 ```
 
 ---
 
 ## Self-Review Notes
 
-- **Spec coverage:** §4 architecture → Tasks 1,10,12. §5.1–5.4 components → Tasks 1,3,5,6,7,10. §6 data model → Task 2/3. §7 API → Tasks 8,9. §8 security (TTL, API key hash, rotation grace period) → Tasks 6,9. §9 testing → every task's TDD step + Task 11. §10 infra → Tasks 1,10,12. All spec sections have a covering task.
+- **Spec coverage:** §4 architecture (single-DC Patroni HA) → Tasks 1,10,12. §5.1–5.4 components → Tasks 1,3,5,6,7,10,12. §6 data model (no `region` column) → Task 2/3/7. §7 API → Tasks 8,9. §8 security (TTL, API key hash, rotation grace period) → Tasks 6,9. §9 testing (incl. manual Patroni failover check) → every task's TDD step + Task 11 + Task 12 Step 5. §10 infra → Tasks 1,10,12,13. All spec sections have a covering task.
 - **Placeholder scan:** none found — every step has runnable code.
-- **Type consistency checked:** `TurnCredentialService.issueCredential(Tenant, String, String)` signature is identical between Task 7's implementation and Task 8's controller usage; `RedisRateLimiter.tryAcquire(UUID, int)` matches between Task 5 and Task 7; `TurnSecretRepository.findByRealm(String)` matches between Task 3 and Task 7.
-- **Fixed during review:** Task 6's interceptor code originally referenced an unused `BCrypt` import — flagged inline in the task so the implementer removes it; the shipped method (`sha256Hex`) does not use it.
+- **Type consistency checked:** `TurnCredentialService.issueCredential(Tenant, String)` signature (no `region` param, per the single-DC scope lock) is identical across Task 7's implementation, Task 7's test, and Task 8's controller usage; `RedisRateLimiter.tryAcquire(UUID, int)` matches between Task 5 and Task 7; `TurnSecretRepository.findByRealm(String)` matches between Task 3 and Task 7; `CredentialIssuanceLog(UUID, String, int)` constructor matches between its definition and `TurnCredentialService`'s call site.
+- **Fixed during review:** Task 6's interceptor code originally referenced an unused `BCrypt` import — flagged inline in the task so the implementer removes it; the shipped method (`sha256Hex`) does not use it. Removed the `region` parameter/column end-to-end (schema, entity, service, controller, tests) after the scope was locked to a single DC. Split the old Task 12 into Task 12 (Patroni/etcd/HAProxy infra) and Task 13 (logging/README) since they became independently reviewable once the HA cluster grew its own set of files and a manual-verification step.
