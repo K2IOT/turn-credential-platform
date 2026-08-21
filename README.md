@@ -1,13 +1,12 @@
 # TURN Credential Platform
 
-Multi-tenant TURN REST API credential issuance service. Single data
-center, highly available within that DC (no multi-region/multi-DC).
+Multi-tenant TURN REST API credential issuance service. Single data center, highly available within that DC.
 
 ---
 
 ## API Usage Flow
 
-Below is the complete end-to-end API workflow for onboarding tenants, issuing TURN credentials, rotating secrets, and connecting to coturn.
+Below is the complete end-to-end API workflow for onboarding tenants, issuing TURN credentials, rotating secrets with grace periods, and connecting WebRTC clients or Coturn servers.
 
 ```mermaid
 sequenceDiagram
@@ -19,27 +18,31 @@ sequenceDiagram
     participant Coturn as Coturn Server (:3478)
 
     Note over Admin, DB: Step 1: Admin Tenant Onboarding
-    Admin->>API: POST /v1/admin/tenants
+    Admin->>API: POST /v1/admin/tenants (X-Admin-Api-Key)
     API->>DB: Save tenant (api_key_hash) & initial turn_secret
-    API-->>Admin: 201 Created (returns raw X-Api-Key)
+    API-->>Admin: 201 Created (returns tenantId & raw X-Api-Key)
 
     Note over Client, Coturn: Step 2: Credential Issuance
     Client->>API: POST /v1/turn-credentials (X-Api-Key: <key>, userId: "user-123")
-    API->>DB: Validate API key hash & fetch tenant secret
+    API->>DB: Validate API key hash & fetch current tenant secret
     API->>API: Sign HMAC-SHA1(secret, "expiry:user-123")
     API->>DB: Write credential_issuance_log
     API-->>Client: 200 OK (username, password, ttlSeconds, uris)
 
     Note over Client, Coturn: Step 3: Media Connection
     Client->>Coturn: STUN/TURN allocate request (username, password)
-    Coturn->>DB: Read turn_secret (psql-userdb)
+    Coturn->>DB: Read valid secrets (turn_secret WHERE valid_until IS NULL OR valid_until > NOW())
     Coturn-->>Client: 200 OK (TURN Session Established)
 
     Note over Admin, DB: Step 4: Secret Rotation (Grace Period)
-    Admin->>API: POST /v1/admin/tenants/{realm}/rotate-secret
-    API->>DB: Move active secret to previous_value (15m grace), write new value
+    Admin->>API: POST /v1/admin/tenants/{tenantId}/rotate-secret (X-Admin-Api-Key)
+    API->>DB: Set valid_until = now()+15m on active secret, insert new current secret
     API-->>Admin: 204 No Content
 ```
+
+---
+
+## API Endpoints Reference
 
 ### 1. Provision a Tenant (Admin Endpoint)
 
@@ -48,6 +51,7 @@ Provision a new customer ("tenant"). The raw API key is returned **only once** u
 **Request:**
 ```bash
 curl -i -X POST http://localhost:8080/v1/admin/tenants \
+  -H "X-Admin-Api-Key: dev-admin-key" \
   -H "Content-Type: application/json" \
   -d '{
         "name": "Acme Corp",
@@ -109,21 +113,29 @@ Rotate a tenant's HMAC secret with a zero-downtime grace period.
 
 **Request:**
 ```bash
-curl -i -X POST http://localhost:8080/v1/admin/tenants/acme.turn.yourplatform.com/rotate-secret
+curl -i -X POST http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/rotate-secret \
+  -H "X-Admin-Api-Key: dev-admin-key"
 ```
 
 **Response (`204 No Content`)**
 
 ---
 
+### 4. Health & Metrics Endpoints
+
+- **Health Check**: `GET http://localhost:8080/actuator/health`
+- **Prometheus Metrics**: `GET http://localhost:8080/actuator/prometheus`
+
+---
+
 ## Detailed Explanation: Tenant TURN Secret Rotation
 
-### Overview & Problem Statement
+### Overview & Multi-Row Schema Design
 In the TURN REST API standard (`use-auth-secret`), credentials (`username` + `password`) are signed statelessly using a shared per-tenant HMAC-SHA1 secret (`value`).
 
-When a tenant secret needs to be rotated (e.g. routine security compliance or security incident response):
-1. **Without a grace period:** Wiping the old secret immediately breaks all WebRTC clients whose credentials were issued seconds before rotation but haven't finished ICE candidate allocation yet.
-2. **With a grace period:** The system retains the previous secret for a configurable window (default **15 minutes**), allowing existing credentials to validate seamlessly while forcing all new issuance requests to use the new secret.
+When a tenant secret is rotated:
+1. **Without a grace period:** Wiping the old secret immediately breaks WebRTC clients whose credentials were issued right before rotation but haven't completed ICE candidate allocation yet.
+2. **With a multi-row grace period:** The application marks the previous secret to expire after a 15-minute window (`valid_until = NOW() + 15m`), and creates a new current secret (`valid_until IS NULL`). Coturn and the API read all valid secrets for the realm.
 
 ---
 
@@ -131,11 +143,13 @@ When a tenant secret needs to be rotated (e.g. routine security compliance or se
 
 | Column | Type | Description |
 |---|---|---|
-| `realm` | `VARCHAR(255)` | Tenant domain / realm (Primary Key, FK to `tenants(realm)`). |
-| `value` | `VARCHAR(255)` | Current active secret used for signing new credential requests. |
-| `previous_value` | `VARCHAR(255)` | Former secret preserved for in-flight sessions during grace period. |
-| `previous_valid_until` | `TIMESTAMPTZ` | Expiry timestamp (`now() + 15 minutes`) after which `previous_value` is ignored. |
-| `rotated_at` | `TIMESTAMPTZ` | Timestamp when rotation was executed. |
+| `realm` | `VARCHAR(255)` | Tenant domain / realm (Part of Composite PK, FK to `tenants(realm)`). |
+| `value` | `VARCHAR(255)` | Shared secret string (Part of Composite PK). |
+| `valid_until` | `TIMESTAMPTZ` | Nullable expiry timestamp. `NULL` = current active secret for new issuances. Non-`NULL` timestamp in future = grace-period secret. |
+| `created_at` | `TIMESTAMPTZ` | Creation timestamp (`now()`). |
+
+**Primary Key:** `(realm, value)`  
+**Partial Unique Index:** `uq_turn_secret_current` on `turn_secret(realm) WHERE valid_until IS NULL` (ensures at most 1 current secret per realm).
 
 ---
 
@@ -143,47 +157,43 @@ When a tenant secret needs to be rotated (e.g. routine security compliance or se
 
 ```mermaid
 stateDiagram-v2
-    [*] --> ActiveSecret: Initial Onboarding
-    ActiveSecret --> RotatedState: POST /v1/admin/tenants/{realm}/rotate-secret
+    [*] --> CurrentSecret: Initial Onboarding (valid_until = NULL)
+    CurrentSecret --> RotatedState: POST /v1/admin/tenants/{tenantId}/rotate-secret
     
     state RotatedState {
-        [*] --> GracePeriodActive: 0 to 15 mins
-        GracePeriodActive --> GraceExpired: > 15 mins
+        [*] --> GracePeriodActive: 0 to 15 mins (Old secret valid_until = NOW() + 15m)
+        GracePeriodActive --> GraceExpired: > 15 mins (Old secret valid_until <= NOW())
     }
 
     note right of GracePeriodActive
-        - New Credential Requests: Signed with NEW secret (value)
-        - Coturn Validation: Accepts credentials signed with NEW or PREVIOUS secret
+        - New Credential Requests: Signed with new secret (valid_until IS NULL)
+        - Coturn Validation: Accepts credentials signed with current OR valid grace-period secret
     end note
 
     note right of GraceExpired
-        - Previous secret rejected by Coturn
-        - Only NEW secret (value) is valid
+        - Expired grace-period secret automatically cleaned up on next rotation
+        - Coturn ignores expired rows
     end note
 ```
 
 1. **Rotation Trigger (`SecretRotationService.rotate`):**
-   When `POST /v1/admin/tenants/{realm}/rotate-secret` is invoked:
-   - The current active secret (`value`) is copied to `previous_value`.
-   - `previous_valid_until` is populated with `Instant.now().plus(Duration.ofMinutes(15))`.
-   - A fresh 32-byte cryptographically secure random key (Base64 URL-safe) is generated and stored into `value`.
-   - `rotated_at` is set to `Instant.now()`.
+   When `POST /v1/admin/tenants/{tenantId}/rotate-secret` is called:
+   - Expired grace-period rows (`valid_until <= NOW()`) are deleted.
+   - The current active secret (`valid_until IS NULL`) is updated to `valid_until = Instant.now().plus(Duration.ofMinutes(15))`.
+   - A fresh cryptographically secure 32-byte secret (Base64 URL-safe) is inserted with `valid_until = NULL`.
 
 2. **Immediate Cutover for New Issuances:**
-   - Calls to `POST /v1/turn-credentials` immediately fetch `secret.getValue()` and sign new credentials with the **new secret**.
+   - `POST /v1/turn-credentials` calls `findCurrentByRealm()` (`valid_until IS NULL`) and signs new credentials with the **new secret**.
 
 3. **Dual-Secret Validation in Coturn (`psql-userdb`):**
-   - Coturn reads the `turn_secret` table directly from PostgreSQL (`psql-userdb`).
-   - During STUN/TURN allocation attempts, Coturn verifies incoming HMAC-SHA1 signatures against `value`. If signature validation fails and `previous_valid_until > now()`, Coturn falls back to validating against `previous_value`.
-
-4. **Grace Window Expiry:**
-   - Once 15 minutes elapse (`now() > previous_valid_until`), Coturn rejects any remaining credentials signed with `previous_value`.
+   - Coturn queries Postgres for valid secrets (`valid_until IS NULL OR valid_until > NOW()`).
+   - During STUN/TURN allocation attempts, Coturn validates signatures against any active secret for the tenant realm.
 
 ---
 
-### 4. Connect to Coturn or WebRTC Client
+## Client Integration Examples
 
-#### A. WebRTC Client (`RTCPeerConnection` configuration)
+### WebRTC Client (`RTCPeerConnection`)
 ```javascript
 const turnResponse = await fetch('https://api.yourplatform.com/v1/turn-credentials', {
   method: 'POST',
@@ -205,7 +215,7 @@ const pc = new RTCPeerConnection({
 });
 ```
 
-#### B. Manual Verification via `turnutils_uclient`
+### Manual Verification via `turnutils_uclient`
 ```bash
 turnutils_uclient -u "1755700000:user-42" -w "dGhpcyBpcyBhIHZhbGlk..." -p 3478 localhost
 ```
@@ -232,10 +242,3 @@ See `docker-compose.prod.yml`:
 - Redis 7 (rate limiting)
 - Coturn cluster (`psql-userdb` reading Postgres through HAProxy)
 - N Credential Service Spring Boot instances (Java 21 virtual threads)
-
-**Manual Failover Test:**
-```bash
-docker compose -f docker-compose.prod.yml stop pg1
-# Confirm another node is promoted to leader within ~10-30s
-# and credential issuance continues through haproxy:5000
-```
