@@ -42,8 +42,14 @@ class TenantAdminControllerTest {
 
     @Test
     void rotatesSecretForExistingTenant() throws Exception {
+        java.util.UUID tenantId = java.util.UUID.randomUUID();
+        Tenant tenant = new Tenant();
+        tenant.setId(tenantId);
+        tenant.setRealm("acme.turn.yourplatform.com");
+        when(tenantRepository.findById(tenantId)).thenReturn(java.util.Optional.of(tenant));
         when(adminAuthInterceptor.preHandle(any(), any(), any())).thenReturn(true);
-        mockMvc.perform(post("/v1/admin/tenants/acme.turn.yourplatform.com/rotate-secret"))
+
+        mockMvc.perform(post("/v1/admin/tenants/" + tenantId + "/rotate-secret"))
                 .andExpect(status().isNoContent());
     }
 }

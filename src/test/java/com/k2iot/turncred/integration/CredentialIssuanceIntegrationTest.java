@@ -53,6 +53,7 @@ class CredentialIssuanceIntegrationTest {
 
         HttpHeaders jsonHeaders = new HttpHeaders();
         jsonHeaders.set("Content-Type", "application/json");
+        jsonHeaders.set("X-Admin-Api-Key", "dev-admin-key");
 
         var createResponse = restTemplate.postForEntity("/v1/admin/tenants",
                 new HttpEntity<>(objectMapper.writeValueAsString(createBody), jsonHeaders), String.class);
@@ -73,5 +74,10 @@ class CredentialIssuanceIntegrationTest {
         assertThat(credential.get("username").asText()).contains(":");
         assertThat(credential.get("password").asText()).isNotBlank();
         assertThat(credential.get("ttlSeconds").asInt()).isEqualTo(3600);
+
+        String tenantId = created.get("id").asText();
+        var rotateResponse = restTemplate.exchange("/v1/admin/tenants/" + tenantId + "/rotate-secret",
+                HttpMethod.POST, new HttpEntity<>(jsonHeaders), Void.class);
+        assertThat(rotateResponse.getStatusCode().value()).isEqualTo(204);
     }
 }

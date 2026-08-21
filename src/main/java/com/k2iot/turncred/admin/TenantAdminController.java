@@ -14,6 +14,9 @@ import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Base64;
 
+import jakarta.validation.Valid;
+import java.util.UUID;
+
 @RestController
 @RequestMapping("/v1/admin/tenants")
 public class TenantAdminController {
@@ -29,7 +32,7 @@ public class TenantAdminController {
 
     @PostMapping
     @ResponseStatus(HttpStatus.CREATED)
-    public CreateTenantResponse create(@RequestBody CreateTenantRequest request) {
+    public CreateTenantResponse create(@RequestBody @Valid CreateTenantRequest request) {
         String rawApiKey = generateApiKey();
 
         Tenant tenant = new Tenant();
@@ -47,10 +50,12 @@ public class TenantAdminController {
                 tenant.getRealm(), rawApiKey);
     }
 
-    @PostMapping("/{realm}/rotate-secret")
+    @PostMapping("/{id}/rotate-secret")
     @ResponseStatus(HttpStatus.NO_CONTENT)
-    public void rotateSecret(@PathVariable String realm) {
-        secretRotationService.rotate(realm, Duration.ofMinutes(15));
+    public void rotateSecret(@PathVariable UUID id) {
+        Tenant tenant = tenantRepository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("Tenant not found: " + id));
+        secretRotationService.rotate(tenant.getRealm(), Duration.ofMinutes(15));
     }
 
     private String generateApiKey() {
