@@ -105,7 +105,7 @@ curl -i -X POST http://localhost:8080/v1/turn-credentials \
 
 ### 3. Rotate Tenant TURN Secret (Admin Endpoint)
 
-Rotate a tenant's HMAC secret. To prevent disrupting in-flight sessions, the old secret remains valid for a 15-minute grace period (`previous_value` and `previous_valid_until`).
+Rotate a tenant's HMAC secret with a zero-downtime grace period.
 
 **Request:**
 ```bash
@@ -113,6 +113,71 @@ curl -i -X POST http://localhost:8080/v1/admin/tenants/acme.turn.yourplatform.co
 ```
 
 **Response (`204 No Content`)**
+
+---
+
+## Detailed Explanation: Tenant TURN Secret Rotation
+
+### Overview & Problem Statement
+In the TURN REST API standard (`use-auth-secret`), credentials (`username` + `password`) are signed statelessly using a shared per-tenant HMAC-SHA1 secret (`value`).
+
+When a tenant secret needs to be rotated (e.g. routine security compliance or security incident response):
+1. **Without a grace period:** Wiping the old secret immediately breaks all WebRTC clients whose credentials were issued seconds before rotation but haven't finished ICE candidate allocation yet.
+2. **With a grace period:** The system retains the previous secret for a configurable window (default **15 minutes**), allowing existing credentials to validate seamlessly while forcing all new issuance requests to use the new secret.
+
+---
+
+### Data Model Structure (`turn_secret` table)
+
+| Column | Type | Description |
+|---|---|---|
+| `realm` | `VARCHAR(255)` | Tenant domain / realm (Primary Key, FK to `tenants(realm)`). |
+| `value` | `VARCHAR(255)` | Current active secret used for signing new credential requests. |
+| `previous_value` | `VARCHAR(255)` | Former secret preserved for in-flight sessions during grace period. |
+| `previous_valid_until` | `TIMESTAMPTZ` | Expiry timestamp (`now() + 15 minutes`) after which `previous_value` is ignored. |
+| `rotated_at` | `TIMESTAMPTZ` | Timestamp when rotation was executed. |
+
+---
+
+### How Secret Rotation Works (Step-by-Step)
+
+```mermaid
+stateDiagram-v2
+    [*] --> ActiveSecret: Initial Onboarding
+    ActiveSecret --> RotatedState: POST /v1/admin/tenants/{realm}/rotate-secret
+    
+    state RotatedState {
+        [*] --> GracePeriodActive: 0 to 15 mins
+        GracePeriodActive --> GraceExpired: > 15 mins
+    }
+
+    note right of GracePeriodActive
+        - New Credential Requests: Signed with NEW secret (value)
+        - Coturn Validation: Accepts credentials signed with NEW or PREVIOUS secret
+    end note
+
+    note right of GraceExpired
+        - Previous secret rejected by Coturn
+        - Only NEW secret (value) is valid
+    end note
+```
+
+1. **Rotation Trigger (`SecretRotationService.rotate`):**
+   When `POST /v1/admin/tenants/{realm}/rotate-secret` is invoked:
+   - The current active secret (`value`) is copied to `previous_value`.
+   - `previous_valid_until` is populated with `Instant.now().plus(Duration.ofMinutes(15))`.
+   - A fresh 32-byte cryptographically secure random key (Base64 URL-safe) is generated and stored into `value`.
+   - `rotated_at` is set to `Instant.now()`.
+
+2. **Immediate Cutover for New Issuances:**
+   - Calls to `POST /v1/turn-credentials` immediately fetch `secret.getValue()` and sign new credentials with the **new secret**.
+
+3. **Dual-Secret Validation in Coturn (`psql-userdb`):**
+   - Coturn reads the `turn_secret` table directly from PostgreSQL (`psql-userdb`).
+   - During STUN/TURN allocation attempts, Coturn verifies incoming HMAC-SHA1 signatures against `value`. If signature validation fails and `previous_valid_until > now()`, Coturn falls back to validating against `previous_value`.
+
+4. **Grace Window Expiry:**
+   - Once 15 minutes elapse (`now() > previous_valid_until`), Coturn rejects any remaining credentials signed with `previous_value`.
 
 ---
 
