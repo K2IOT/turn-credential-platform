@@ -1,5 +1,6 @@
 package com.k2iot.turncred.admin;
 
+import com.k2iot.turncred.util.HashUtil;
 import com.k2iot.turncred.admin.dto.CreateTenantRequest;
 import com.k2iot.turncred.admin.dto.CreateTenantResponse;
 import com.k2iot.turncred.secret.SecretRotationService;
@@ -9,11 +10,9 @@ import com.k2iot.turncred.tenant.TenantStatus;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.*;
 
-import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Duration;
 import java.util.Base64;
-import java.util.HexFormat;
 
 @RestController
 @RequestMapping("/v1/admin/tenants")
@@ -36,7 +35,7 @@ public class TenantAdminController {
         Tenant tenant = new Tenant();
         tenant.setName(request.name());
         tenant.setRealm(request.realm());
-        tenant.setApiKeyHash(sha256Hex(rawApiKey));
+        tenant.setApiKeyHash(HashUtil.sha256Hex(rawApiKey));
         tenant.setStatus(TenantStatus.ACTIVE);
         tenant.setCredentialTtlSec(3600);
         tenant.setRateLimitPerMin(600);
@@ -58,14 +57,5 @@ public class TenantAdminController {
         byte[] bytes = new byte[32];
         secureRandom.nextBytes(bytes);
         return "tcp_" + Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
-    }
-
-    private String sha256Hex(String value) {
-        try {
-            MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            return HexFormat.of().formatHex(digest.digest(value.getBytes()));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
     }
 }
