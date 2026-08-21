@@ -32,7 +32,7 @@ public class TurnCredentialService {
             throw new RateLimitExceededException(tenant.getId());
         }
 
-        TurnSecret secret = secretRepository.findByRealm(tenant.getRealm())
+        TurnSecret secret = secretRepository.findCurrentByRealm(tenant.getRealm())
                 .orElseThrow(() -> new IllegalStateException("No TURN secret configured for realm " + tenant.getRealm()));
 
         long expiry = Instant.now().plusSeconds(tenant.getCredentialTtlSec()).getEpochSecond();

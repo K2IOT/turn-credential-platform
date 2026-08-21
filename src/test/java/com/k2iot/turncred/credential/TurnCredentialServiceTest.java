@@ -2,6 +2,7 @@ package com.k2iot.turncred.credential;
 
 import com.k2iot.turncred.ratelimit.RedisRateLimiter;
 import com.k2iot.turncred.secret.TurnSecret;
+import com.k2iot.turncred.secret.TurnSecretId;
 import com.k2iot.turncred.secret.TurnSecretRepository;
 import com.k2iot.turncred.tenant.Tenant;
 import org.junit.jupiter.api.Test;
@@ -34,12 +35,10 @@ class TurnCredentialServiceTest {
     @Test
     void issuesCredentialSignedWithTenantSecret() {
         Tenant tenant = tenantWithRealm("acme.turn.yourplatform.com");
-        TurnSecret secret = new TurnSecret();
-        secret.setRealm(tenant.getRealm());
-        secret.setValue("super-secret");
+        TurnSecret secret = new TurnSecret(new TurnSecretId(tenant.getRealm(), "super-secret"));
 
         when(rateLimiter.tryAcquire(tenant.getId(), 600)).thenReturn(true);
-        when(secretRepository.findByRealm(tenant.getRealm())).thenReturn(Optional.of(secret));
+        when(secretRepository.findCurrentByRealm(tenant.getRealm())).thenReturn(Optional.of(secret));
 
         TurnCredential credential = service.issueCredential(tenant, "user-42");
 
@@ -62,7 +61,7 @@ class TurnCredentialServiceTest {
     void throwsWhenTenantHasNoSecretConfigured() {
         Tenant tenant = tenantWithRealm("orphan.turn.yourplatform.com");
         when(rateLimiter.tryAcquire(tenant.getId(), 600)).thenReturn(true);
-        when(secretRepository.findByRealm(tenant.getRealm())).thenReturn(Optional.empty());
+        when(secretRepository.findCurrentByRealm(tenant.getRealm())).thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.issueCredential(tenant, "user-42"))
                 .isInstanceOf(IllegalStateException.class);
