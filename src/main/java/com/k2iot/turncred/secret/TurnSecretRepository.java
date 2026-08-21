@@ -17,7 +17,7 @@ public interface TurnSecretRepository extends JpaRepository<TurnSecret, TurnSecr
            "AND (s.validUntil IS NULL OR s.validUntil > CURRENT_TIMESTAMP)")
     List<TurnSecret> findValidByRealm(@Param("realm") String realm);
 
-    @Modifying
+    @Modifying(clearAutomatically = true)
     @Query("DELETE FROM TurnSecret s WHERE s.id.realm = :realm " +
            "AND s.validUntil IS NOT NULL AND s.validUntil <= CURRENT_TIMESTAMP")
     void deleteExpiredForRealm(@Param("realm") String realm);

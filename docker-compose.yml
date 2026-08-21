@@ -9,18 +9,27 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U turncred -d turncred"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
 
   redis:
     image: redis:7
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 10
 
   coturn:
     image: coturn/coturn:latest
     depends_on:
-      - postgres
-    environment:
-      TURN_EXTERNAL_IP: 127.0.0.1
+      postgres:
+        condition: service_healthy
     volumes:
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf
     ports:
@@ -32,8 +41,10 @@ services:
   app:
     build: .
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/turncred
       SPRING_DATA_REDIS_HOST: redis
