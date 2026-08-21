@@ -63,6 +63,7 @@ class CredentialIssuanceIntegrationTest {
 
         HttpHeaders authHeaders = new HttpHeaders();
         authHeaders.set("X-Api-Key", apiKey);
+        authHeaders.set("Content-Type", "application/json");
 
         var credResponse = restTemplate.exchange("/v1/turn-credentials", HttpMethod.POST,
                 new HttpEntity<>(authHeaders), String.class);
