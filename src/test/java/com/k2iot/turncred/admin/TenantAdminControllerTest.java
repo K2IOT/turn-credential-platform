@@ -22,11 +22,13 @@ class TenantAdminControllerTest {
     @Autowired MockMvc mockMvc;
     @MockBean TenantRepository tenantRepository;
     @MockBean SecretRotationService secretRotationService;
+    @MockBean com.k2iot.turncred.auth.AdminAuthInterceptor adminAuthInterceptor;
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @Test
     void createsTenantAndReturnsRawApiKeyOnce() throws Exception {
+        when(adminAuthInterceptor.preHandle(any(), any(), any())).thenReturn(true);
         when(tenantRepository.save(any(Tenant.class))).thenAnswer(inv -> inv.getArgument(0));
 
         mockMvc.perform(post("/v1/admin/tenants")
@@ -40,6 +42,7 @@ class TenantAdminControllerTest {
 
     @Test
     void rotatesSecretForExistingTenant() throws Exception {
+        when(adminAuthInterceptor.preHandle(any(), any(), any())).thenReturn(true);
         mockMvc.perform(post("/v1/admin/tenants/acme.turn.yourplatform.com/rotate-secret"))
                 .andExpect(status().isNoContent());
     }
