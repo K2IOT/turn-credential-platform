@@ -29,11 +29,13 @@ public class RequestLoggingFilter implements Filter {
         try {
             chain.doFilter(request, response);
         } finally {
+            Object tenantIdAttr = httpRequest.getAttribute("tenantId");
             var tenant = CurrentTenantHolder.get();
+            String tenantIdStr = tenantIdAttr != null ? tenantIdAttr.toString() : (tenant != null ? tenant.getId().toString() : "anonymous");
             long latencyMs = System.currentTimeMillis() - start;
             log.info("request method={} path={} status={} tenantId={} latencyMs={}",
                     httpRequest.getMethod(), httpRequest.getRequestURI(), httpResponse.getStatus(),
-                    tenant != null ? tenant.getId() : "anonymous", latencyMs);
+                    tenantIdStr, latencyMs);
             MDC.remove("requestId");
         }
     }

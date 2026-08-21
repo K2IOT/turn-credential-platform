@@ -37,6 +37,9 @@ public class TenantAuthInterceptor implements HandlerInterceptor {
         }
 
         CurrentTenantHolder.set(tenant.get());
+        if (tenant.get().getId() != null) {
+            request.setAttribute("tenantId", tenant.get().getId().toString());
+        }
         return true;
     }
 
