@@ -15,5 +15,30 @@ services:
     ports:
       - "6379:6379"
 
+  coturn:
+    image: coturn/coturn:4.6
+    depends_on:
+      - postgres
+    environment:
+      TURN_EXTERNAL_IP: 127.0.0.1
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+
+  app:
+    build: .
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/turncred
+      SPRING_DATA_REDIS_HOST: redis
+    ports:
+      - "8080:8080"
+
 volumes:
   pgdata:
