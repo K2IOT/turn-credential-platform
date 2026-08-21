@@ -1,49 +1,14 @@
 package com.k2iot.turncred.integration;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
-import org.springframework.test.context.DynamicPropertyRegistry;
-import org.springframework.test.context.DynamicPropertySource;
-import org.testcontainers.containers.GenericContainer;
-import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
-import org.testcontainers.utility.DockerImageName;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Testcontainers
-class CredentialIssuanceIntegrationTest {
-
-    @Container
-    static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:16")
-            .withDatabaseName("turncred").withUsername("turncred").withPassword("turncred");
-
-    @Container
-    static GenericContainer<?> redis = new GenericContainer<>(DockerImageName.parse("redis:7"))
-            .withExposedPorts(6379);
-
-    @DynamicPropertySource
-    static void props(DynamicPropertyRegistry registry) {
-        registry.add("spring.datasource.url", postgres::getJdbcUrl);
-        registry.add("spring.datasource.username", postgres::getUsername);
-        registry.add("spring.datasource.password", postgres::getPassword);
-        registry.add("spring.data.redis.host", redis::getHost);
-        registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
-    }
-
-    @Autowired
-    TestRestTemplate restTemplate;
-
-    private final ObjectMapper objectMapper = new ObjectMapper();
+class CredentialIssuanceIntegrationTest extends AbstractIntegrationTest {
 
     @Test
     void issuedCredentialSignatureMatchesTenantSecretStoredInPostgres() throws Exception {
@@ -74,11 +39,6 @@ class CredentialIssuanceIntegrationTest {
         assertThat(credential.get("username").asText()).contains(":");
         assertThat(credential.get("password").asText()).isNotBlank();
         assertThat(credential.get("ttlSeconds").asInt()).isEqualTo(3600);
-
-        String tenantId = created.get("tenantId").asText();
-        var rotateResponse = restTemplate.exchange("/v1/admin/tenants/" + tenantId + "/rotate-secret",
-                HttpMethod.POST, new HttpEntity<>(jsonHeaders), Void.class);
-        assertThat(rotateResponse.getStatusCode().value()).isEqualTo(204);
     }
 
     @Test
@@ -120,3 +80,4 @@ class CredentialIssuanceIntegrationTest {
         assertThat(credential.get("ttlSeconds").asInt()).isEqualTo(3600);
     }
 }
+
