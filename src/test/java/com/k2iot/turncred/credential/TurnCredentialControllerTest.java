@@ -3,6 +3,7 @@ package com.k2iot.turncred.credential;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.k2iot.turncred.auth.CurrentTenantHolder;
 import com.k2iot.turncred.tenant.Tenant;
+import com.k2iot.turncred.tenant.TenantRepository;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,6 +27,9 @@ class TurnCredentialControllerTest {
     @MockBean
     TurnCredentialService credentialService;
 
+    @MockBean
+    TenantRepository tenantRepository;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     @AfterEach
@@ -37,7 +41,8 @@ class TurnCredentialControllerTest {
     void issuesCredentialForAuthenticatedTenant() throws Exception {
         Tenant tenant = new Tenant();
         tenant.setId(UUID.randomUUID());
-        CurrentTenantHolder.set(tenant);
+        tenant.setStatus(com.k2iot.turncred.tenant.TenantStatus.ACTIVE);
+        when(tenantRepository.findByApiKeyHash(anyString())).thenReturn(java.util.Optional.of(tenant));
 
         TurnCredential credential = new TurnCredential(
                 "1755700000:user-42", "signed-password", 3600,
@@ -45,6 +50,7 @@ class TurnCredentialControllerTest {
         when(credentialService.issueCredential(eq(tenant), anyString())).thenReturn(credential);
 
         mockMvc.perform(post("/v1/turn-credentials")
+                        .header("X-Api-Key", "valid-key")
                         .contentType("application/json")
                         .content(objectMapper.writeValueAsString(new java.util.HashMap<>())))
                 .andExpect(status().isOk())
@@ -56,12 +62,14 @@ class TurnCredentialControllerTest {
     void returns429WhenRateLimitExceeded() throws Exception {
         Tenant tenant = new Tenant();
         tenant.setId(UUID.randomUUID());
-        CurrentTenantHolder.set(tenant);
+        tenant.setStatus(com.k2iot.turncred.tenant.TenantStatus.ACTIVE);
+        when(tenantRepository.findByApiKeyHash(anyString())).thenReturn(java.util.Optional.of(tenant));
 
         when(credentialService.issueCredential(eq(tenant), anyString()))
                 .thenThrow(new RateLimitExceededException(tenant.getId()));
 
         mockMvc.perform(post("/v1/turn-credentials")
+                        .header("X-Api-Key", "valid-key")
                         .contentType("application/json")
                         .content("{}"))
                 .andExpect(status().isTooManyRequests());
