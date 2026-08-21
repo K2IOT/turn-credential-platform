@@ -16,7 +16,7 @@ services:
       - "6379:6379"
 
   coturn:
-    image: coturn/coturn:4.6
+    image: coturn/coturn:latest
     depends_on:
       - postgres
     environment:
