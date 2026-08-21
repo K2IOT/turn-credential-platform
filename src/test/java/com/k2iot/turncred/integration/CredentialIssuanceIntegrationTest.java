@@ -75,7 +75,7 @@ class CredentialIssuanceIntegrationTest {
         assertThat(credential.get("password").asText()).isNotBlank();
         assertThat(credential.get("ttlSeconds").asInt()).isEqualTo(3600);
 
-        String tenantId = created.get("id").asText();
+        String tenantId = created.get("tenantId").asText();
         var rotateResponse = restTemplate.exchange("/v1/admin/tenants/" + tenantId + "/rotate-secret",
                 HttpMethod.POST, new HttpEntity<>(jsonHeaders), Void.class);
         assertThat(rotateResponse.getStatusCode().value()).isEqualTo(204);
