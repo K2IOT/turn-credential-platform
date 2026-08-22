@@ -68,8 +68,9 @@ jobs:
           fi
           grep -Eq '^[[:space:]]+log[[:space:]]+stdout[[:space:]]+format[[:space:]]+raw[[:space:]]+local0' haproxy/haproxy.cfg
           grep -Eq '^[[:space:]]+log[[:space:]]+stdout[[:space:]]+format[[:space:]]+raw[[:space:]]+local0' haproxy/api-haproxy.cfg
-          if grep -Fq 'actions/checkout@v4' .github/workflows/ci.yml; then
-            echo 'actions/checkout@v4 still targets deprecated Node 20 runtime' >&2
+          checkout_v5_count="$(grep -Ec 'uses:[[:space:]]+actions/checkout@v5' .github/workflows/ci.yml)"
+          if [[ "$checkout_v5_count" -ne 3 ]]; then
+            echo "Expected all 3 checkout steps to use actions/checkout@v5, found ${checkout_v5_count}" >&2
             exit 1
           fi
           grep -Fq './scripts/verify-ha.sh' README.md
