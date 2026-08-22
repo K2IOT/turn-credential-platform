@@ -107,4 +107,47 @@ class TurnSecretRepositoryTest {
                 .contains("current-val")
                 .doesNotContain("expired-val");
     }
+
+    @Test
+    void findCurrentByRealmAndUserId_returnsPerUserSecret() {
+        createTenant("realm.test");
+        TurnSecret userSecret = new TurnSecret(new TurnSecretId("realm.test", "alice", "user-secret-val"));
+        repo.save(userSecret);
+
+        Optional<TurnSecret> found = repo.findCurrentByRealmAndUserId("realm.test", "alice");
+
+        assertThat(found).isPresent();
+        assertThat(found.get().getValue()).isEqualTo("user-secret-val");
+        assertThat(found.get().getUserId()).isEqualTo("alice");
+    }
+
+    @Test
+    void findCurrentByRealmAndUserId_doesNotReturnRealmLevelSecret() {
+        createTenant("realm2.test");
+        TurnSecret realmSecret = new TurnSecret(new TurnSecretId("realm2.test", "realm-val"));
+        repo.save(realmSecret);
+
+        Optional<TurnSecret> found = repo.findCurrentByRealmAndUserId("realm2.test", "bob");
+
+        assertThat(found).isEmpty();
+    }
+
+    @Test
+    void deleteExpiredForRealmAndUserId_removesOnlyThatUsersExpiredRows() {
+        createTenant("realm3.test");
+        TurnSecret aliceExpired = new TurnSecret(new TurnSecretId("realm3.test", "alice", "alice-old"));
+        aliceExpired.setValidUntil(Instant.now().minusSeconds(60));
+        repo.save(aliceExpired);
+
+        TurnSecret bobExpired = new TurnSecret(new TurnSecretId("realm3.test", "bob", "bob-old"));
+        bobExpired.setValidUntil(Instant.now().minusSeconds(60));
+        repo.save(bobExpired);
+
+        repo.deleteExpiredForRealmAndUserId("realm3.test", "alice");
+        repo.flush();
+
+        assertThat(repo.findById(new TurnSecretId("realm3.test", "alice", "alice-old"))).isEmpty();
+        assertThat(repo.findById(new TurnSecretId("realm3.test", "bob", "bob-old"))).isPresent();
+    }
 }
+

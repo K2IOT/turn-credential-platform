@@ -10,6 +10,9 @@ public class TurnSecret {
     @EmbeddedId
     private TurnSecretId id;
 
+    @Column(name = "user_id")
+    private String userId;
+
     @Column(name = "valid_until")
     private Instant validUntil;
 
@@ -20,13 +23,34 @@ public class TurnSecret {
 
     public TurnSecret(TurnSecretId id) {
         this.id = id;
+        if (id != null) {
+            this.userId = id.getUserId();
+        }
     }
 
-    public TurnSecretId getId() { return id; }
-    public void setId(TurnSecretId id) { this.id = id; }
+    public TurnSecretId getId() {
+        if (id != null && id.getUserId() == null && userId != null) {
+            id.setUserId(userId);
+        }
+        return id;
+    }
 
-    public String getRealm() { return id.getRealm(); }
-    public String getValue() { return id.getValue(); }
+    public void setId(TurnSecretId id) {
+        this.id = id;
+        if (id != null) {
+            this.userId = id.getUserId();
+        }
+    }
+
+    public String getRealm() { return id != null ? id.getRealm() : null; }
+    public String getValue() { return id != null ? id.getValue() : null; }
+    public String getUserId() { return userId; } // null for realm-level secrets
+    public void setUserId(String userId) {
+        this.userId = userId;
+        if (this.id != null) {
+            this.id.setUserId(userId);
+        }
+    }
 
     public Instant getValidUntil() { return validUntil; }
     public void setValidUntil(Instant validUntil) { this.validUntil = validUntil; }
