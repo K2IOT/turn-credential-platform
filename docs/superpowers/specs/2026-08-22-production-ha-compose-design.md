@@ -85,22 +85,26 @@ Redis remains a single service in this change because the requested HA scope is 
 
 ## Coturn
 
-Production Coturn must not use the development `127.0.0.1:5432` PostgreSQL connection. Add a production Coturn config that uses `db-haproxy:5000` for `psql-userdb`.
+Production Coturn must not use the development `127.0.0.1:5432` PostgreSQL connection. `docker-compose.prod.yml` injects `--psql-userdb` at runtime with host `db-haproxy`, port `5000`, and environment-supplied application database credentials. The checked-in Coturn config therefore contains no embedded PostgreSQL username/password.
+
+Upstream Coturn's PostgreSQL driver loads shared TURN REST API secrets by realm and does not support a `userdb-user-secret-query` override. Application-level `user_id` / `valid_until` filtering is not claimed as part of this HA change.
 
 `TURN_EXTERNAL_IP` is applied through a Compose command-line option so the runtime value is not hard-coded into the config file.
 
 ## Secrets and defaults
 
-CI may use deterministic non-secret fallback values so pull requests can bootstrap without repository secrets. Production operators must override:
+`docker-compose.prod.yml` is fail-closed for deployment-specific values. Rendering or starting the production Compose stack requires explicit values for:
 
 - `POSTGRES_SUPERUSER_PASSWORD`
 - `REPLICATOR_PASSWORD`
+- `POSTGRES_APP_DB`
 - `POSTGRES_APP_USER`
 - `POSTGRES_APP_PASSWORD`
+- `TURN_ADMIN_API_KEY`
 - `TURN_EXTERNAL_IP`
-- application admin/API secrets as appropriate
+- `TURN_PLATFORM_DOMAIN`
 
-No credentials are exposed as host ports or stored in generated artifacts.
+GitHub Actions supplies explicit CI-only values in the workflow environment so pull requests can bootstrap without repository secrets. Those values are test inputs, not defaults in the production Compose file or Coturn configuration.
 
 ## Health and startup ordering
 
