@@ -6,12 +6,12 @@ x-patroni-environment: &patroni-environment
   PATRONI_RESTAPI_LISTEN: 0.0.0.0:8008
   PATRONI_POSTGRESQL_DATA_DIR: /var/lib/postgresql/data
   PATRONI_SUPERUSER_USERNAME: postgres
-  PATRONI_SUPERUSER_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-ci-postgres-secret}
+  PATRONI_SUPERUSER_PASSWORD: "${POSTGRES_SUPERUSER_PASSWORD:?POSTGRES_SUPERUSER_PASSWORD must be set}"
   PATRONI_REPLICATION_USERNAME: replicator
-  PATRONI_REPLICATION_PASSWORD: ${REPLICATOR_PASSWORD:-ci-replicator-secret}
-  POSTGRES_APP_DB: ${POSTGRES_APP_DB:-turncred}
-  POSTGRES_APP_USER: ${POSTGRES_APP_USER:-turncred}
-  POSTGRES_APP_PASSWORD: ${POSTGRES_APP_PASSWORD:-turncred}
+  PATRONI_REPLICATION_PASSWORD: "${REPLICATOR_PASSWORD:?REPLICATOR_PASSWORD must be set}"
+  POSTGRES_APP_DB: "${POSTGRES_APP_DB:?POSTGRES_APP_DB must be set}"
+  POSTGRES_APP_USER: "${POSTGRES_APP_USER:?POSTGRES_APP_USER must be set}"
+  POSTGRES_APP_PASSWORD: "${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be set}"
 
 x-patroni-common: &patroni-common
   build:
@@ -37,13 +37,13 @@ x-patroni-common: &patroni-common
   stop_grace_period: 30s
 
 x-app-environment: &app-environment
-  SPRING_DATASOURCE_URL: jdbc:postgresql://db-haproxy:5000/${POSTGRES_APP_DB:-turncred}
-  SPRING_DATASOURCE_USERNAME: ${POSTGRES_APP_USER:-turncred}
-  SPRING_DATASOURCE_PASSWORD: ${POSTGRES_APP_PASSWORD:-turncred}
+  SPRING_DATASOURCE_URL: "jdbc:postgresql://db-haproxy:5000/${POSTGRES_APP_DB:?POSTGRES_APP_DB must be set}"
+  SPRING_DATASOURCE_USERNAME: "${POSTGRES_APP_USER:?POSTGRES_APP_USER must be set}"
+  SPRING_DATASOURCE_PASSWORD: "${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be set}"
   SPRING_DATA_REDIS_HOST: redis
   SPRING_DATA_REDIS_PORT: 6379
-  TURN_ADMIN_API_KEY: ${TURN_ADMIN_API_KEY:-dev-admin-key}
-  TURN_PLATFORM_DOMAIN: ${TURN_PLATFORM_DOMAIN:-yourplatform.com}
+  TURN_ADMIN_API_KEY: "${TURN_ADMIN_API_KEY:?TURN_ADMIN_API_KEY must be set}"
+  TURN_PLATFORM_DOMAIN: "${TURN_PLATFORM_DOMAIN:?TURN_PLATFORM_DOMAIN must be set}"
 
 x-app-common: &app-common
   build: .
@@ -197,7 +197,7 @@ services:
       db-haproxy:
         condition: service_started
     environment:
-      TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-127.0.0.1}
+      TURN_EXTERNAL_IP: "${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP must be set}"
     volumes:
       - ./coturn/turnserver.prod.conf:/etc/coturn/turnserver.conf:ro
     ports:
@@ -207,8 +207,8 @@ services:
     command:
       - -c
       - /etc/coturn/turnserver.conf
-      - --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
-      - --psql-userdb=host=db-haproxy port=5000 dbname=${POSTGRES_APP_DB:-turncred} user=${POSTGRES_APP_USER:-turncred} password=${POSTGRES_APP_PASSWORD:-turncred} connect_timeout=10
+      - "--external-ip=${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP must be set}"
+      - "--psql-userdb=host=db-haproxy port=5000 dbname=${POSTGRES_APP_DB:?POSTGRES_APP_DB must be set} user=${POSTGRES_APP_USER:?POSTGRES_APP_USER must be set} password=${POSTGRES_APP_PASSWORD:?POSTGRES_APP_PASSWORD must be set} connect_timeout=10"
     restart: unless-stopped
 
   app1:
