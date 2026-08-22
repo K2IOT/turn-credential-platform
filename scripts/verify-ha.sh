@@ -75,7 +75,8 @@ verify_static_contract() {
 
   require_contains haproxy/api-haproxy.cfg 'option[[:space:]]+httpchk[[:space:]]+GET[[:space:]]+/actuator/health'
   require_contains docker-compose.prod.yml '"8080:8080"'
-  require_contains coturn/turnserver.prod.conf 'host=db-haproxy[[:space:]]+port=5000'
+  require_contains docker-compose.prod.yml '--psql-userdb=host=db-haproxy[[:space:]]+port=5000'
+  require_not_contains coturn/turnserver.prod.conf '^[[:space:]]*psql-userdb='
 
   local standalone_pg_count
   standalone_pg_count="$(grep -Ec '^[[:space:]]+image:[[:space:]]+postgres:16([[:space:]]|$)' docker-compose.prod.yml || true)"
