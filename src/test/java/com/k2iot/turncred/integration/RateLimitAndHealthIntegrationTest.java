@@ -36,6 +36,14 @@ class RateLimitAndHealthIntegrationTest extends AbstractIntegrationTest {
         String apiKey = tenantJson.get("apiKey").asText();
         UUID tenantId = UUID.fromString(tenantJson.get("tenantId").asText());
 
+        // Register user-1
+        var userBody = new HashMap<String, String>();
+        userBody.put("userId", "user-1");
+        var userRes = restTemplate.postForEntity(
+                "/v1/admin/tenants/" + tenantId + "/users",
+                new HttpEntity<>(objectMapper.writeValueAsString(userBody), adminHeaders), String.class);
+        assertThat(userRes.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
         // Set low rate limit threshold (e.g. 2 requests per minute)
         Tenant tenant = tenantRepository.findById(tenantId).orElseThrow();
         tenant.setRateLimitPerMin(2);
@@ -45,16 +53,20 @@ class RateLimitAndHealthIntegrationTest extends AbstractIntegrationTest {
         clientHeaders.set("X-Api-Key", apiKey);
         clientHeaders.set("Content-Type", "application/json");
 
+        var credBody = new HashMap<String, String>();
+        credBody.put("userId", "user-1");
+        var credRequest = new HttpEntity<>(objectMapper.writeValueAsString(credBody), clientHeaders);
+
         // Request 1: OK
-        var res1 = restTemplate.exchange("/v1/turn-credentials", HttpMethod.POST, new HttpEntity<>(clientHeaders), String.class);
+        var res1 = restTemplate.postForEntity("/v1/turn-credentials", credRequest, String.class);
         assertThat(res1.getStatusCode()).isEqualTo(HttpStatus.OK);
 
         // Request 2: OK
-        var res2 = restTemplate.exchange("/v1/turn-credentials", HttpMethod.POST, new HttpEntity<>(clientHeaders), String.class);
+        var res2 = restTemplate.postForEntity("/v1/turn-credentials", credRequest, String.class);
         assertThat(res2.getStatusCode()).isEqualTo(HttpStatus.OK);
 
         // Request 3: Exceeded -> 429 TOO_MANY_REQUESTS
-        var res3 = restTemplate.exchange("/v1/turn-credentials", HttpMethod.POST, new HttpEntity<>(clientHeaders), String.class);
+        var res3 = restTemplate.postForEntity("/v1/turn-credentials", credRequest, String.class);
         assertThat(res3.getStatusCode()).isEqualTo(HttpStatus.TOO_MANY_REQUESTS);
     }
 

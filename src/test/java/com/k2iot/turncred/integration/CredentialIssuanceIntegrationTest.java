@@ -6,13 +6,15 @@ import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 
+import java.util.HashMap;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class CredentialIssuanceIntegrationTest extends AbstractIntegrationTest {
 
     @Test
     void issuedCredentialSignatureMatchesTenantSecretStoredInPostgres() throws Exception {
-        var createBody = new java.util.HashMap<String, String>();
+        var createBody = new HashMap<String, String>();
         createBody.put("name", "Acme Corp");
         createBody.put("realm", "acme.turn.yourplatform.com");
 
@@ -25,14 +27,25 @@ class CredentialIssuanceIntegrationTest extends AbstractIntegrationTest {
         assertThat(createResponse.getStatusCode().value()).isEqualTo(201);
 
         JsonNode created = objectMapper.readTree(createResponse.getBody());
+        String tenantId = created.get("tenantId").asText();
         String apiKey = created.get("apiKey").asText();
+
+        var userBody = new HashMap<String, String>();
+        userBody.put("userId", "user-123");
+        var userRes = restTemplate.postForEntity(
+                "/v1/admin/tenants/" + tenantId + "/users",
+                new HttpEntity<>(objectMapper.writeValueAsString(userBody), jsonHeaders), String.class);
+        assertThat(userRes.getStatusCode().value()).isEqualTo(201);
 
         HttpHeaders authHeaders = new HttpHeaders();
         authHeaders.set("X-Api-Key", apiKey);
         authHeaders.set("Content-Type", "application/json");
 
-        var credResponse = restTemplate.exchange("/v1/turn-credentials", HttpMethod.POST,
-                new HttpEntity<>(authHeaders), String.class);
+        var credBody = new HashMap<String, String>();
+        credBody.put("userId", "user-123");
+
+        var credResponse = restTemplate.postForEntity("/v1/turn-credentials",
+                new HttpEntity<>(objectMapper.writeValueAsString(credBody), authHeaders), String.class);
 
         assertThat(credResponse.getStatusCode().value()).isEqualTo(200);
         JsonNode credential = objectMapper.readTree(credResponse.getBody());
@@ -43,7 +56,7 @@ class CredentialIssuanceIntegrationTest extends AbstractIntegrationTest {
 
     @Test
     void afterRotationIssuanceStillWorksWithNewCurrentSecret() throws Exception {
-        var createBody = new java.util.HashMap<String, String>();
+        var createBody = new HashMap<String, String>();
         createBody.put("name", "Rotation Test Corp");
         createBody.put("realm", "rot.turn.yourplatform.com");
 
@@ -59,6 +72,13 @@ class CredentialIssuanceIntegrationTest extends AbstractIntegrationTest {
         String tenantId = created.get("tenantId").asText();
         String apiKey = created.get("apiKey").asText();
 
+        var userBody = new HashMap<String, String>();
+        userBody.put("userId", "user-123");
+        var userRes = restTemplate.postForEntity(
+                "/v1/admin/tenants/" + tenantId + "/users",
+                new HttpEntity<>(objectMapper.writeValueAsString(userBody), jsonHeaders), String.class);
+        assertThat(userRes.getStatusCode().value()).isEqualTo(201);
+
         // Rotate secret — old secret enters grace period, new current secret inserted
         var rotateResponse = restTemplate.exchange(
                 "/v1/admin/tenants/" + tenantId + "/rotate-secret",
@@ -70,8 +90,11 @@ class CredentialIssuanceIntegrationTest extends AbstractIntegrationTest {
         authHeaders.set("X-Api-Key", apiKey);
         authHeaders.set("Content-Type", "application/json");
 
-        var credResponse = restTemplate.exchange("/v1/turn-credentials", HttpMethod.POST,
-                new HttpEntity<>(authHeaders), String.class);
+        var credBody = new HashMap<String, String>();
+        credBody.put("userId", "user-123");
+
+        var credResponse = restTemplate.postForEntity("/v1/turn-credentials",
+                new HttpEntity<>(objectMapper.writeValueAsString(credBody), authHeaders), String.class);
         assertThat(credResponse.getStatusCode().value()).isEqualTo(200);
 
         JsonNode credential = objectMapper.readTree(credResponse.getBody());

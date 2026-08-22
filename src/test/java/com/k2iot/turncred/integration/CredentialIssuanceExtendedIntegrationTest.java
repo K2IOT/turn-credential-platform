@@ -43,6 +43,13 @@ class CredentialIssuanceExtendedIntegrationTest extends AbstractIntegrationTest 
         String apiKey = tenantJson.get("apiKey").asText();
         UUID tenantId = UUID.fromString(tenantJson.get("tenantId").asText());
 
+        var userBody = new HashMap<String, String>();
+        userBody.put("userId", "custom-user-999");
+        var userRes = restTemplate.postForEntity(
+                "/v1/admin/tenants/" + tenantId + "/users",
+                new HttpEntity<>(objectMapper.writeValueAsString(userBody), adminHeaders), String.class);
+        assertThat(userRes.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+
         HttpHeaders clientHeaders = new HttpHeaders();
         clientHeaders.set("X-Api-Key", apiKey);
         clientHeaders.set("Content-Type", "application/json");
