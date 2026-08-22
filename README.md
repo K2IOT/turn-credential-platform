@@ -1,54 +1,59 @@
 # TURN Credential Platform
 
-Multi-tenant TURN REST API credential issuance service. Single data center, highly available within that DC.
+Multi-tenant service for issuing ephemeral TURN REST API credentials, managing tenant/user secrets, and running a production-like HA reference topology.
 
----
+## Architecture
+
+### Local development
+
+The default `docker-compose.yml` is intended for local development and E2E testing.
+
+### Production HA reference
+
+`docker-compose.prod.yml` is the CI reference topology:
+
+```text
+                         :8080
+Client/API ───────► api-haproxy
+                    /    |    \
+                  app1  app2  app3
+                    \    |    /
+                     db-haproxy:5000
+                            |
+                     PostgreSQL writes
+                    /       |       \
+                  pg1      pg2      pg3
+                   |        |        |
+                Patroni  Patroni  Patroni
+                    \       |       /
+                    etcd1  etcd2  etcd3
+
+Coturn ─────────────► db-haproxy:5000
+Redis ──────────────► app1/app2/app3
+```
+
+The database HAProxy uses Patroni `GET /primary` on port 8008 and only routes PostgreSQL traffic to the current primary. API HAProxy round-robins across `app1`, `app2`, and `app3` and health-checks `/actuator/health`.
+
+> **HA boundary:** this Compose topology provides process/container-level HA on a **single Docker host**. It does not survive loss of that host. Cross-host/node HA requires Kubernetes or another orchestrator with the roles distributed across independent hosts.
+
+Remaining single points of failure in this reference topology:
+
+- Redis is standalone.
+- Coturn is a single instance.
+- API HAProxy and DB HAProxy are single instances inside the single-host Compose reference.
+- Internal etcd/Patroni/PostgreSQL traffic is not TLS/mTLS protected by this change.
+- Backup/PITR is not implemented by this change.
 
 ## API Usage Flow
 
-Below is the complete end-to-end API workflow for onboarding tenants, issuing TURN credentials, rotating secrets with grace periods, and connecting WebRTC clients or Coturn servers.
+1. An administrator creates a tenant with `POST /v1/admin/tenants`.
+2. The tenant pre-registers/activates users through the admin endpoints.
+3. A tenant application requests credentials with `POST /v1/turn-credentials`.
+4. The service returns a timestamped TURN username and HMAC password.
+5. The client uses those credentials against Coturn.
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Admin
-    actor Client as Tenant App Client
-    participant API as Credential Service (:8080)
-    participant DB as Postgres (turncred)
-    participant Coturn as Coturn Server (:3478)
+Example tenant onboarding:
 
-    Note over Admin, DB: Step 1: Admin Tenant Onboarding
-    Admin->>API: POST /v1/admin/tenants (X-Admin-Api-Key)
-    API->>DB: Save tenant (api_key_hash) & initial turn_secret
-    API-->>Admin: 201 Created (returns tenantId & raw X-Api-Key)
-
-    Note over Client, Coturn: Step 2: Credential Issuance
-    Client->>API: POST /v1/turn-credentials (X-Api-Key: <key>, userId: "user-123")
-    API->>DB: Validate API key hash & fetch current tenant secret
-    API->>API: Sign HMAC-SHA1(secret, "expiry:user-123")
-    API->>DB: Write credential_issuance_log
-    API-->>Client: 200 OK (username, password, ttlSeconds, uris)
-
-    Note over Client, Coturn: Step 3: Media Connection
-    Client->>Coturn: STUN/TURN allocate request (username, password)
-    Coturn->>DB: Read valid secrets (turn_secret WHERE valid_until IS NULL OR valid_until > NOW())
-    Coturn-->>Client: 200 OK (TURN Session Established)
-
-    Note over Admin, DB: Step 4: Secret Rotation (Grace Period)
-    Admin->>API: POST /v1/admin/tenants/{tenantId}/rotate-secret (X-Admin-Api-Key)
-    API->>DB: Set valid_until = now()+15m on active secret, insert new current secret
-    API-->>Admin: 204 No Content
-```
-
----
-
-## API Endpoints Reference
-
-### 1. Provision a Tenant (Admin Endpoint)
-
-Provision a new customer ("tenant"). The raw API key is returned **only once** upon creation.
-
-**Request:**
 ```bash
 curl -i -X POST http://localhost:8080/v1/admin/tenants \
   -H "X-Admin-Api-Key: dev-admin-key" \
@@ -59,242 +64,148 @@ curl -i -X POST http://localhost:8080/v1/admin/tenants \
       }'
 ```
 
-**Response (`201 Created`):**
-```json
-{
-  "tenantId": "c4a3b2a1-1234-4567-89ab-cdef01234567",
-  "realm": "acme.turn.yourplatform.com",
-  "apiKey": "tcp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
-}
-```
+Example credential issuance:
 
-> **Note:** Save the `apiKey` (`tcp_...`). The platform only stores the SHA-256 hash of this key.
-
----
-
-### 2. Issue TURN Credentials (Tenant Endpoint)
-
-Tenant applications use their API key to request ephemeral TURN REST API credentials for end users.
-
-**Request:**
 ```bash
 curl -i -X POST http://localhost:8080/v1/turn-credentials \
-  -H "X-Api-Key: tcp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6" \
-  -H "Content-Type: application/json" \
-  -d '{
-        "userId": "user-42"
-      }'
-```
-*(Note: `userId` is optional. If omitted, a random UUID will be assigned automatically.)*
-
-**Response (`200 OK`):**
-```json
-{
-  "username": "1755700000:user-42",
-  "password": "dGhpcyBpcyBhIHZhbGlkIGhtYWMgc2lnbmF0dXJl=",
-  "ttlSeconds": 3600,
-  "uris": [
-    "turn:acme.turn.yourplatform.com:3478?transport=udp",
-    "turns:acme.turn.yourplatform.com:5349?transport=tcp"
-  ]
-}
-```
-
-**HTTP Status Codes:**
-- `200 OK`: Credential successfully generated and logged.
-- `401 Unauthorized`: Missing or invalid `X-Api-Key`, or tenant status is `SUSPENDED`.
-- `429 Too Many Requests`: Tenant exceeded its configured per-minute rate limit.
-
----
-
-### 3. Register & Manage Per-UserId Secrets (Admin Endpoints)
-
-Pre-register specific `userId`s for a tenant and manage their dedicated TURN HMAC secrets.
-
-#### Register a User
-**Request:**
-```bash
-curl -i -X POST http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/users \
-  -H "X-Admin-Api-Key: dev-admin-key" \
+  -H "X-Api-Key: <tenant-api-key>" \
   -H "Content-Type: application/json" \
   -d '{ "userId": "user-42" }'
 ```
-**Response (`201 Created`):**
-```json
-{
-  "userId": "user-42",
-  "tenantId": "c4a3b2a1-1234-4567-89ab-cdef01234567"
-}
-```
 
-#### Rotate a User's Secret (15-Minute Zero-Downtime Grace Period)
-**Request:**
+The response contains `username`, `password`, `ttlSeconds`, and TURN URIs.
+
+## Main API Endpoints
+
+- `POST /v1/admin/tenants` — create a tenant.
+- `POST /v1/admin/tenants/{tenantId}/users` — register a user.
+- `POST /v1/admin/tenants/{tenantId}/users/{userId}/rotate-secret` — rotate a user secret.
+- `DELETE /v1/admin/tenants/{tenantId}/users/{userId}` — suspend/deregister a user.
+- `POST /v1/turn-credentials` — issue ephemeral TURN credentials.
+- `GET /actuator/health` — health check.
+- `GET /actuator/prometheus` — Prometheus metrics.
+
+## Local Development
+
+Build and start the default stack:
+
 ```bash
-curl -i -X POST http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/users/user-42/rotate-secret \
-  -H "X-Admin-Api-Key: dev-admin-key"
+./mvnw clean package -DskipTests
+docker compose up -d --build
 ```
-**Response (`204 No Content`)** *(Returns `404 Not Found` if user is unregistered)*
 
-#### Deregister / Suspend a User
-**Request:**
+Run unit tests:
+
 ```bash
-curl -i -X DELETE http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/users/user-42 \
-  -H "X-Admin-Api-Key: dev-admin-key"
+./mvnw test
 ```
-**Response (`204 No Content`)** *(Subsequent credential requests for `user-42` will return `403 Forbidden`)*
 
----
+## End-to-End Verification
 
-### 4. Health & Metrics Endpoints
-
-- **Health Check**: `GET http://localhost:8080/actuator/health`
-- **Prometheus Metrics**: `GET http://localhost:8080/actuator/prometheus`
-
----
-
-## Automated End-to-End Testing Script
-
-An automated bash script is provided in [`scripts/verify-e2e.sh`](file:///home/vht/project/turn-credential-platform/scripts/verify-e2e.sh) to build the application, spin up the Docker stack, wait for healthiness, and execute the complete 9-step E2E API verification scenario.
-
-### Running Default Local Compose Stack
+The existing API E2E suite is:
 
 ```bash
 ./scripts/verify-e2e.sh
 ```
 
-### Running Production Multi-Node HA Topology Stack
+It validates the 9-step API workflow for tenant onboarding, registration, credential issuance, secret rotation, deregistration, and expected error handling.
+
+When called by the HA verifier, the E2E suite reuses the already-running production topology instead of rebuilding/restarting it.
+
+## Production HA Deployment
+
+The production-like reference stack is started with:
 
 ```bash
-COMPOSE_FILE=docker-compose.prod.yml ./scripts/verify-e2e.sh
+docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-### Automated Verifications Executed:
-1. **Admin Tenant Onboarding** (`POST /v1/admin/tenants`) → `201 Created`
-2. **Unregistered User Enforcement** (`POST /v1/turn-credentials`) → `403 Forbidden`
-3. **Admin User Pre-Registration** (`POST /v1/admin/tenants/{tenantId}/users`) → `201 Created`
-4. **Registered User Credential Issuance** (`POST /v1/turn-credentials`) → `200 OK`
-5. **Admin User Secret Rotation** (`POST .../users/{userId}/rotate-secret`) → `204 No Content`
-6. **Post-Rotation Credential Issuance** → `200 OK` (verifies new HMAC password signature)
-7. **Admin User Deregistration / Suspension** (`DELETE .../users/{userId}`) → `204 No Content`
-8. **Post-Deregistration Issuance Enforcement** → `403 Forbidden`
-9. **Unknown User Secret Rotation Error Handling** → `404 Not Found`
+Before a real deployment, override at least:
 
----
-
-## Detailed Explanation: Tenant TURN Secret Rotation
-
-### Overview & Multi-Row Schema Design
-In the TURN REST API standard (`use-auth-secret`), credentials (`username` + `password`) are signed statelessly using a shared per-tenant HMAC-SHA1 secret (`value`).
-
-When a tenant secret is rotated:
-1. **Without a grace period:** Wiping the old secret immediately breaks WebRTC clients whose credentials were issued right before rotation but haven't completed ICE candidate allocation yet.
-2. **With a multi-row grace period:** The application marks the previous secret to expire after a 15-minute window (`valid_until = NOW() + 15m`), and creates a new current secret (`valid_until IS NULL`). Coturn and the API read all valid secrets for the realm.
-
----
-
-### Data Model Structure (`turn_secret` table)
-
-| Column | Type | Description |
-|---|---|---|
-| `realm` | `VARCHAR(255)` | Tenant domain / realm (Part of Composite PK, FK to `tenants(realm)`). |
-| `value` | `VARCHAR(255)` | Shared secret string (Part of Composite PK). |
-| `user_id` | `VARCHAR(255)` | Nullable user ID (`NULL` = legacy realm secret; non-`NULL` = per-userId secret). |
-| `valid_until` | `TIMESTAMPTZ` | Nullable expiry timestamp. `NULL` = current active secret for new issuances. Non-`NULL` timestamp in future = grace-period secret. |
-| `created_at` | `TIMESTAMPTZ` | Creation timestamp (`now()`). |
-
-**Primary Key:** `(realm, value)`  
-**Partial Unique Index:** `uq_turn_secret_current_realm` on `turn_secret(realm) WHERE user_id IS NULL AND valid_until IS NULL`  
-**Partial Unique Index:** `uq_turn_secret_current_user` on `turn_secret(realm, user_id) WHERE user_id IS NOT NULL AND valid_until IS NULL`  
-
----
-
-### How Secret Rotation Works (Step-by-Step)
-
-```mermaid
-stateDiagram-v2
-    [*] --> CurrentSecret: Initial Onboarding (valid_until = NULL)
-    CurrentSecret --> RotatedState: POST /v1/admin/tenants/{tenantId}/users/{userId}/rotate-secret
-    
-    state RotatedState {
-        [*] --> GracePeriodActive: 0 to 15 mins (Old secret valid_until = NOW() + 15m)
-        GracePeriodActive --> GraceExpired: > 15 mins (Old secret valid_until <= NOW())
-    }
-
-    note right of GracePeriodActive
-        - New Credential Requests: Signed with new secret (valid_until IS NULL)
-        - Coturn Validation: Accepts credentials signed with current OR valid grace-period secret
-    end note
-
-    note right of GraceExpired
-        - Expired grace-period secret automatically cleaned up on next rotation
-        - Coturn ignores expired rows
-    end note
+```text
+POSTGRES_SUPERUSER_PASSWORD
+REPLICATOR_PASSWORD
+POSTGRES_APP_DB
+POSTGRES_APP_USER
+POSTGRES_APP_PASSWORD
+TURN_ADMIN_API_KEY
+TURN_EXTERNAL_IP
+TURN_PLATFORM_DOMAIN
 ```
 
-1. **Rotation Trigger (`UserSecretRotationService.rotateUserSecret`):**
-   When `POST /v1/admin/tenants/{tenantId}/users/{userId}/rotate-secret` is called:
-   - Expired grace-period rows (`valid_until <= NOW()`) are deleted.
-   - The current active secret (`valid_until IS NULL`) is updated to `valid_until = Instant.now().plus(Duration.ofMinutes(15))`.
-   - A fresh cryptographically secure 32-byte secret (Base64 URL-safe) is inserted with `valid_until = NULL`.
+The deterministic fallback values in `docker-compose.prod.yml` exist so CI can bootstrap without repository secrets. They are not production credentials.
 
-2. **Immediate Cutover for New Issuances:**
-   - `POST /v1/turn-credentials` calls `findCurrentByRealmAndUserId()` (`valid_until IS NULL`) and signs new credentials with the **new secret**.
+### Full HA acceptance
 
-3. **Dual-Secret Validation in Coturn (`psql-userdb`):**
-   - Coturn queries Postgres for valid secrets (`valid_until IS NULL OR valid_until > NOW()`).
-   - During STUN/TURN allocation attempts, Coturn validates signatures against any active secret for the tenant realm or specific `userId`.
-
----
-
-## Client Integration Examples
-
-### WebRTC Client (`RTCPeerConnection`)
-```javascript
-const turnResponse = await fetch('https://api.yourplatform.com/v1/turn-credentials', {
-  method: 'POST',
-  headers: {
-    'X-Api-Key': 'tcp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6',
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({ userId: 'user-42' })
-}).then(res => res.json());
-
-const pc = new RTCPeerConnection({
-  iceServers: [
-    {
-      urls: turnResponse.uris,
-      username: turnResponse.username,
-      credential: turnResponse.password
-    }
-  ]
-});
-```
-
-### Manual Verification via `turnutils_uclient`
-```bash
-turnutils_uclient -u "1755700000:user-42" -w "dGhpcyBpcyBhIHZhbGlk..." -p 3478 localhost
-```
-
----
-
-## Local Development
-
-Start Postgres, Redis, Coturn, and the Spring Boot application locally via Docker Compose:
+Run the same acceptance gate used by CI:
 
 ```bash
-mvn clean package -DskipTests
-docker compose up -d --build
+./scripts/verify-ha.sh
 ```
 
----
+The verifier starts from clean volumes and requires all of the following:
 
-## Production Topology
+1. Three healthy etcd members.
+2. One Patroni primary and two replicas.
+3. SQL connectivity through DB HAProxy.
+4. Replication of a committed marker to both replicas.
+5. Three healthy Spring Boot application instances.
+6. The complete 9-case API E2E flow through API HAProxy.
+7. Failure of the current PostgreSQL primary and promotion of a different node.
+8. Survival of committed data and a successful application write after failover.
+9. Rejoin/catch-up of the former primary as a replica.
+10. Continued API availability while `app1` is stopped.
+11. Recovery to three healthy application instances after `app1` restarts.
 
-See `docker-compose.prod.yml`:
-- 3-node etcd cluster (Patroni DCS)
-- 3-node Patroni-managed Postgres cluster (1 leader, 1 sync replica, 1 async replica)
-- HAProxy fronting Postgres (routes writes & reads to current Patroni leader via `/leader` healthcheck on port 8008)
-- Redis 7 (rate limiting)
-- Coturn cluster (`psql-userdb` reading Postgres through HAProxy)
-- N Credential Service Spring Boot instances (Java 21 virtual threads)
+Static topology/config validation can be run separately:
 
+```bash
+./scripts/verify-ha.sh --static-only
+docker compose -f docker-compose.prod.yml config -q
+```
+
+## Coturn Production Notes
+
+The production Coturn container is pinned to a specific upstream image version and connects to PostgreSQL through `db-haproxy:5000`.
+
+Upstream Coturn's PostgreSQL driver loads TURN REST API shared secrets with a realm lookup equivalent to:
+
+```sql
+SELECT value FROM turn_secret WHERE realm = $1;
+```
+
+Coturn does **not** expose a `userdb-user-secret-query` configuration option. Therefore this HA change does not claim that Coturn itself enforces this project's `user_id` or `valid_until` columns. The per-user/secret-expiry compatibility gap is a separate correctness/hardening workstream and must not be considered solved merely because the HA topology is green.
+
+### TURNS / port 5349
+
+`turnserver.prod.conf` declares the standard TLS listener port, but production certificates/private keys are not provisioned by this Compose reference. A real TURNS deployment must mount/configure `cert` and `pkey` before relying on the `turns:...:5349` URI returned by the application.
+
+Plain TURN on port 3478 is independent of that certificate requirement.
+
+## Secret Rotation Model
+
+`turn_secret` supports multiple secrets per realm so the application can preserve a grace period during rotation. The application chooses the current secret for new credential issuance and records expiry metadata for older rows.
+
+Because upstream Coturn's PostgreSQL shared-secret query is realm-only, enforcement of per-user binding and database-side `valid_until` filtering requires additional integration work beyond this HA PR. Credential usernames still contain their own expiration timestamp, which Coturn validates as part of TURN REST API authentication.
+
+## CI
+
+`.github/workflows/ci.yml` runs:
+
+- `test` — Maven unit tests.
+- `ha-static-contract` — HA topology/config contract plus rendered Compose validation.
+- `ha-integration` — clean production topology, API E2E, PostgreSQL failover/rejoin, data survival, and application redundancy.
+
+E2E currently runs inside `ha-integration`; it is not a separate GitHub Actions job.
+
+## Production Hardening Still Out of Scope
+
+The following are intentionally separate workstreams:
+
+- Redis Sentinel/Cluster.
+- Multiple Coturn instances / TURN load balancing or anycast.
+- Coturn per-user and `valid_until` database filtering compatibility.
+- TURNS certificate lifecycle and secret mounts.
+- Internal TLS/mTLS for etcd, Patroni REST, and PostgreSQL.
+- PostgreSQL backup/PITR.
+- Cross-host scheduling and host/datacenter failure handling.
