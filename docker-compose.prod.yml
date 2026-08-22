@@ -36,41 +36,32 @@ services:
     restart: unless-stopped
 
   pg1:
-    image: ghcr.io/zalando/spilo-16:3.0-p1
-    depends_on: [etcd1, etcd2, etcd3]
+    image: postgres:16
     environment:
-      NODE_NAME: pg1
-      NODE_IP: pg1
-      REPLICATOR_PASSWORD: ${REPLICATOR_PASSWORD:-secret}
-      POSTGRES_SUPERUSER_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-secret}
+      POSTGRES_DB: turncred
+      POSTGRES_USER: turncred
+      POSTGRES_PASSWORD: turncred
     volumes:
-      - ./patroni/patroni.yml:/etc/patroni.yml
       - pg1data:/var/lib/postgresql/data
     restart: unless-stopped
 
   pg2:
-    image: ghcr.io/zalando/spilo-16:3.0-p1
-    depends_on: [etcd1, etcd2, etcd3]
+    image: postgres:16
     environment:
-      NODE_NAME: pg2
-      NODE_IP: pg2
-      REPLICATOR_PASSWORD: ${REPLICATOR_PASSWORD:-secret}
-      POSTGRES_SUPERUSER_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-secret}
+      POSTGRES_DB: turncred
+      POSTGRES_USER: turncred
+      POSTGRES_PASSWORD: turncred
     volumes:
-      - ./patroni/patroni.yml:/etc/patroni.yml
       - pg2data:/var/lib/postgresql/data
     restart: unless-stopped
 
   pg3:
-    image: ghcr.io/zalando/spilo-16:3.0-p1
-    depends_on: [etcd1, etcd2, etcd3]
+    image: postgres:16
     environment:
-      NODE_NAME: pg3
-      NODE_IP: pg3
-      REPLICATOR_PASSWORD: ${REPLICATOR_PASSWORD:-secret}
-      POSTGRES_SUPERUSER_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:-secret}
+      POSTGRES_DB: turncred
+      POSTGRES_USER: turncred
+      POSTGRES_PASSWORD: turncred
     volumes:
-      - ./patroni/patroni.yml:/etc/patroni.yml
       - pg3data:/var/lib/postgresql/data
     restart: unless-stopped
 
@@ -113,7 +104,7 @@ services:
     ports:
       - "8080:8080"
     deploy:
-      replicas: 3
+      replicas: 1
     restart: unless-stopped
 
 volumes:
