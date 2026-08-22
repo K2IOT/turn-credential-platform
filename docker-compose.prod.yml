@@ -36,7 +36,7 @@ services:
     restart: unless-stopped
 
   pg1:
-    image: zalando/patroni:v3.2.2
+    image: ghcr.io/zalando/spilo-16:3.0-p1
     depends_on: [etcd1, etcd2, etcd3]
     environment:
       NODE_NAME: pg1
@@ -49,7 +49,7 @@ services:
     restart: unless-stopped
 
   pg2:
-    image: zalando/patroni:v3.2.2
+    image: ghcr.io/zalando/spilo-16:3.0-p1
     depends_on: [etcd1, etcd2, etcd3]
     environment:
       NODE_NAME: pg2
@@ -62,7 +62,7 @@ services:
     restart: unless-stopped
 
   pg3:
-    image: zalando/patroni:v3.2.2
+    image: ghcr.io/zalando/spilo-16:3.0-p1
     depends_on: [etcd1, etcd2, etcd3]
     environment:
       NODE_NAME: pg3
