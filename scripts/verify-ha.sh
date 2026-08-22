@@ -38,7 +38,8 @@ verify_static_contract() {
   require_file coturn/turnserver.prod.conf
 
   require_contains patroni/Dockerfile 'FROM[[:space:]]+postgres:16-bookworm'
-  require_contains patroni/Dockerfile 'patroni\[etcd3\]==4\.1\.4'
+  require_contains patroni/Dockerfile 'ARG[[:space:]]+PATRONI_VERSION=4\.1\.4'
+  require_contains patroni/Dockerfile 'patroni\[etcd3\]==\$\{PATRONI_VERSION\}'
   require_not_contains patroni/patroni.yml '\$\{NODE_(NAME|IP)\}'
   require_contains patroni/patroni.yml 'synchronous_mode:[[:space:]]*(true|on)'
   require_contains patroni/patroni.yml 'synchronous_node_count:[[:space:]]*1'
