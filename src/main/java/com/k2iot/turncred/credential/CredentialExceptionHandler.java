@@ -14,6 +14,10 @@ public class CredentialExceptionHandler {
     @ResponseStatus(HttpStatus.TOO_MANY_REQUESTS)
     public void handleRateLimit() {}
 
+    @ExceptionHandler(UserNotRegisteredException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public void handleUserNotRegistered() {}
+
     @ExceptionHandler(DataIntegrityViolationException.class)
     @ResponseStatus(HttpStatus.CONFLICT)
     public void handleDuplicateKey() {}
