@@ -194,12 +194,12 @@ userdb-user-secret-query="SELECT value FROM turn_secret WHERE realm = $1 AND (va
 
 ### Updated query
 ```
-userdb-user-secret-query="SELECT value FROM turn_secret WHERE realm = $1 AND (user_id IS NULL OR user_id = split_part($2, ':', 2)) AND (valid_until IS NULL OR valid_until > NOW())"
+userdb-user-secret-query="SELECT value FROM turn_secret WHERE realm = $1 AND (user_id IS NULL OR user_id = substring($2 from position(':' in $2) + 1)) AND (valid_until IS NULL OR valid_until > NOW())"
 ```
 
 - `$1` = realm (existing Coturn parameter)
 - `$2` = full username string (`"expiry:userId"`)
-- `split_part($2, ':', 2)` extracts the `userId` after the first colon
+- `substring($2 from position(':' in $2) + 1)` extracts everything after the **first** colon — correctly handles userIds that themselves contain colons (e.g., `"user:alice"` → extracts `"user:alice"` from `"1755700000:user:alice"`)
 - Realm-level secrets (`user_id IS NULL`) always included — backward compatible
 - For a registered userId, Coturn receives both the userId-scoped secret and realm secrets; HMAC validation succeeds only against the right one
 
