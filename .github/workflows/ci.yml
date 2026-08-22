@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
@@ -27,6 +27,9 @@ jobs:
 
       - name: Run unit tests
         run: ./mvnw -B test
+
+      - name: Verify package build
+        run: ./mvnw -B package -DskipTests
 
   ha-static-contract:
     runs-on: ubuntu-latest
@@ -40,6 +43,28 @@ jobs:
 
       - name: Validate rendered Compose configuration
         run: docker compose -f docker-compose.prod.yml config -q
+
+      - name: Verify pre-merge production contracts
+        run: |
+          grep -Eq 'option[[:space:]]+redispatch[[:space:]]+1' haproxy/api-haproxy.cfg
+          grep -Eq 'image:[[:space:]]+coturn/coturn:4\.17\.2-r0' docker-compose.prod.yml
+          grep -Eq 'host=db-haproxy[[:space:]]+port=5000' coturn/turnserver.prod.conf
+          if grep -Eq '^[[:space:]]*(userdb-user-secret-query|no-tlsv1|no-tlsv1_1)(=|[[:space:]]*$)' coturn/turnserver.prod.conf; then
+            echo 'Unsupported Coturn production directive detected' >&2
+            exit 1
+          fi
+          grep -Fq './scripts/verify-ha.sh' README.md
+          grep -Fq 'single Docker host' README.md
+          grep -Fq 'Redis is standalone' README.md
+          grep -Fq 'Coturn is a single instance' README.md
+          if grep -Fq '/leader' README.md; then
+            echo 'README still documents the obsolete Patroni /leader check' >&2
+            exit 1
+          fi
+          if grep -Fq 'Coturn cluster' README.md; then
+            echo 'README incorrectly claims Coturn redundancy' >&2
+            exit 1
+          fi
 
   ha-integration:
     needs:
@@ -60,7 +85,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
