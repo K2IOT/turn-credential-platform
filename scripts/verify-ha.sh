@@ -146,18 +146,19 @@ replica_count() {
 wait_for_cluster() {
   local attempts="${1:-90}"
   local expected_old_primary="${2:-}"
+  local expected_replicas="${3:-2}"
   local i primary replicas
   for ((i=1; i<=attempts; i++)); do
     primary="$(current_primary 2>/dev/null || true)"
     replicas="$(replica_count)"
-    if [[ -n "$primary" && "$replicas" -eq 2 ]]; then
+    if [[ -n "$primary" && "$replicas" -eq "$expected_replicas" ]]; then
       if [[ -z "$expected_old_primary" || "$primary" != "$expected_old_primary" ]]; then
-        echo "Patroni topology ready: primary=${primary}, replicas=${replicas}"
+        echo "Patroni topology ready: primary=${primary}, replicas=${replicas}/${expected_replicas}"
         printf '%s\n' "$primary"
         return 0
       fi
     fi
-    echo "Waiting for Patroni topology ($i/$attempts): primary=${primary:-none}, replicas=${replicas}"
+    echo "Waiting for Patroni topology ($i/$attempts): primary=${primary:-none}, replicas=${replicas}/${expected_replicas}"
     sleep 2
   done
   return 1
@@ -317,7 +318,7 @@ SKIP_BUILD=1 SKIP_COMPOSE_UP=1 COMPOSE_FILE="$COMPOSE_FILE" ADMIN_KEY="$ADMIN_KE
 echo "Stopping current PostgreSQL primary: ${initial_primary}"
 compose stop "$initial_primary"
 
-new_primary="$(wait_for_cluster 90 "$initial_primary")" || fail "Patroni did not promote a new primary after stopping ${initial_primary}"
+new_primary="$(wait_for_cluster 90 "$initial_primary" 1)" || fail "Patroni did not reach degraded one-primary/one-replica topology after stopping ${initial_primary}"
 new_primary="$(printf '%s\n' "$new_primary" | tail -n 1)"
 [[ "$new_primary" != "$initial_primary" ]] || fail "primary did not change after failure"
 wait_for_proxy || fail "database HAProxy did not recover after primary failover"
