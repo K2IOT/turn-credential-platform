@@ -9,9 +9,11 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
-ADMIN_KEY="dev-admin-key"
-BASE_URL="http://localhost:8080"
-TEST_USER="user-script-e2e"
+ADMIN_KEY="${ADMIN_KEY:-dev-admin-key}"
+BASE_URL="${BASE_URL:-http://localhost:8080}"
+TEST_USER="${TEST_USER:-user-script-e2e}"
+SKIP_BUILD="${SKIP_BUILD:-0}"
+SKIP_COMPOSE_UP="${SKIP_COMPOSE_UP:-0}"
 
 echo -e "${BLUE}====================================================${NC}"
 echo -e "${BLUE}  TURN Credential Platform — Docker E2E Verification  ${NC}"
@@ -19,20 +21,28 @@ echo -e "${BLUE}====================================================${NC}"
 echo -e "Using Compose File: ${YELLOW}${COMPOSE_FILE}${NC}"
 
 # Step 1: Package JAR
-echo -e "\n${BLUE}[1/5] Building application JAR...${NC}"
-if [ -f "./mvnw" ]; then
-    ./mvnw clean package -DskipTests
+if [ "$SKIP_BUILD" = "1" ]; then
+    echo -e "\n${BLUE}[1/5] Skipping application build (managed by caller).${NC}"
 else
-    mvn clean package -DskipTests
+    echo -e "\n${BLUE}[1/5] Building application JAR...${NC}"
+    if [ -f "./mvnw" ]; then
+        ./mvnw clean package -DskipTests
+    else
+        mvn clean package -DskipTests
+    fi
 fi
 
 # Step 2: Start Docker Compose
-echo -e "\n${BLUE}[2/5] Starting Docker Compose stack (${COMPOSE_FILE})...${NC}"
-docker compose -f "${COMPOSE_FILE}" up -d --build
+if [ "$SKIP_COMPOSE_UP" = "1" ]; then
+    echo -e "\n${BLUE}[2/5] Reusing running Docker Compose stack.${NC}"
+else
+    echo -e "\n${BLUE}[2/5] Starting Docker Compose stack (${COMPOSE_FILE})...${NC}"
+    docker compose -f "${COMPOSE_FILE}" up -d --build
+fi
 
 # Step 3: Wait for Health Check
 echo -e "\n${BLUE}[3/5] Waiting for application health check at ${BASE_URL}/actuator/health...${NC}"
-MAX_RETRIES=30
+MAX_RETRIES="${MAX_RETRIES:-60}"
 RETRY_COUNT=0
 HEALTHY=false
 
@@ -43,13 +53,14 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
         break
     fi
     RETRY_COUNT=$((RETRY_COUNT + 1))
-    echo "  Waiting for app container... (attempt $RETRY_COUNT/$MAX_RETRIES, status: $HTTP_CODE)"
+    echo "  Waiting for app endpoint... (attempt $RETRY_COUNT/$MAX_RETRIES, status: $HTTP_CODE)"
     sleep 2
 done
 
 if [ "$HEALTHY" = false ]; then
-    echo -e "${RED}ERROR: App container failed to become healthy within timeout.${NC}"
-    docker compose -f "${COMPOSE_FILE}" logs app --tail 50
+    echo -e "${RED}ERROR: Application endpoint failed to become healthy within timeout.${NC}"
+    docker compose -f "${COMPOSE_FILE}" ps || true
+    docker compose -f "${COMPOSE_FILE}" logs --tail 100 || true
     exit 1
 fi
 echo -e "${GREEN}✓ Application is UP and healthy!${NC}"
@@ -57,7 +68,7 @@ echo -e "${GREEN}✓ Application is UP and healthy!${NC}"
 # Step 4: Run E2E Verification Scenario
 echo -e "\n${BLUE}[4/5] Running End-to-End API Verification Flow...${NC}"
 
-RANDOM_SUFFIX=$(date +%s)
+RANDOM_SUFFIX=$(date +%s%N)
 REALM="e2e-script-${RANDOM_SUFFIX}.turn.yourplatform.com"
 
 # 4.1 Onboard Tenant
