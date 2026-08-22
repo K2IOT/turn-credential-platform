@@ -107,17 +107,41 @@ curl -i -X POST http://localhost:8080/v1/turn-credentials \
 
 ---
 
-### 3. Rotate Tenant TURN Secret (Admin Endpoint)
+### 3. Register & Manage Per-UserId Secrets (Admin Endpoints)
 
-Rotate a tenant's HMAC secret with a zero-downtime grace period.
+Pre-register specific `userId`s for a tenant and manage their dedicated TURN HMAC secrets.
 
+#### Register a User
 **Request:**
 ```bash
-curl -i -X POST http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/rotate-secret \
-  -H "X-Admin-Api-Key: dev-admin-key"
+curl -i -X POST http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/users \
+  -H "X-Admin-Api-Key: dev-admin-key" \
+  -H "Content-Type: application/json" \
+  -d '{ "userId": "user-42" }'
+```
+**Response (`201 Created`):**
+```json
+{
+  "userId": "user-42",
+  "tenantId": "c4a3b2a1-1234-4567-89ab-cdef01234567"
+}
 ```
 
-**Response (`204 No Content`)**
+#### Rotate a User's Secret (15-Minute Zero-Downtime Grace Period)
+**Request:**
+```bash
+curl -i -X POST http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/users/user-42/rotate-secret \
+  -H "X-Admin-Api-Key: dev-admin-key"
+```
+**Response (`204 No Content`)** *(Returns `404 Not Found` if user is unregistered)*
+
+#### Deregister / Suspend a User
+**Request:**
+```bash
+curl -i -X DELETE http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/users/user-42 \
+  -H "X-Admin-Api-Key: dev-admin-key"
+```
+**Response (`204 No Content`)** *(Subsequent credential requests for `user-42` will return `403 Forbidden`)*
 
 ---
 
@@ -125,6 +149,35 @@ curl -i -X POST http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-c
 
 - **Health Check**: `GET http://localhost:8080/actuator/health`
 - **Prometheus Metrics**: `GET http://localhost:8080/actuator/prometheus`
+
+---
+
+## Automated End-to-End Testing Script
+
+An automated bash script is provided in [`scripts/verify-e2e.sh`](file:///home/vht/project/turn-credential-platform/scripts/verify-e2e.sh) to build the application, spin up the Docker stack, wait for healthiness, and execute the complete 9-step E2E API verification scenario.
+
+### Running Default Local Compose Stack
+
+```bash
+./scripts/verify-e2e.sh
+```
+
+### Running Production Multi-Node HA Topology Stack
+
+```bash
+COMPOSE_FILE=docker-compose.prod.yml ./scripts/verify-e2e.sh
+```
+
+### Automated Verifications Executed:
+1. **Admin Tenant Onboarding** (`POST /v1/admin/tenants`) → `201 Created`
+2. **Unregistered User Enforcement** (`POST /v1/turn-credentials`) → `403 Forbidden`
+3. **Admin User Pre-Registration** (`POST /v1/admin/tenants/{tenantId}/users`) → `201 Created`
+4. **Registered User Credential Issuance** (`POST /v1/turn-credentials`) → `200 OK`
+5. **Admin User Secret Rotation** (`POST .../users/{userId}/rotate-secret`) → `204 No Content`
+6. **Post-Rotation Credential Issuance** → `200 OK` (verifies new HMAC password signature)
+7. **Admin User Deregistration / Suspension** (`DELETE .../users/{userId}`) → `204 No Content`
+8. **Post-Deregistration Issuance Enforcement** → `403 Forbidden`
+9. **Unknown User Secret Rotation Error Handling** → `404 Not Found`
 
 ---
 
@@ -145,11 +198,13 @@ When a tenant secret is rotated:
 |---|---|---|
 | `realm` | `VARCHAR(255)` | Tenant domain / realm (Part of Composite PK, FK to `tenants(realm)`). |
 | `value` | `VARCHAR(255)` | Shared secret string (Part of Composite PK). |
+| `user_id` | `VARCHAR(255)` | Nullable user ID (`NULL` = legacy realm secret; non-`NULL` = per-userId secret). |
 | `valid_until` | `TIMESTAMPTZ` | Nullable expiry timestamp. `NULL` = current active secret for new issuances. Non-`NULL` timestamp in future = grace-period secret. |
 | `created_at` | `TIMESTAMPTZ` | Creation timestamp (`now()`). |
 
 **Primary Key:** `(realm, value)`  
-**Partial Unique Index:** `uq_turn_secret_current` on `turn_secret(realm) WHERE valid_until IS NULL` (ensures at most 1 current secret per realm).
+**Partial Unique Index:** `uq_turn_secret_current_realm` on `turn_secret(realm) WHERE user_id IS NULL AND valid_until IS NULL`  
+**Partial Unique Index:** `uq_turn_secret_current_user` on `turn_secret(realm, user_id) WHERE user_id IS NOT NULL AND valid_until IS NULL`  
 
 ---
 
@@ -158,7 +213,7 @@ When a tenant secret is rotated:
 ```mermaid
 stateDiagram-v2
     [*] --> CurrentSecret: Initial Onboarding (valid_until = NULL)
-    CurrentSecret --> RotatedState: POST /v1/admin/tenants/{tenantId}/rotate-secret
+    CurrentSecret --> RotatedState: POST /v1/admin/tenants/{tenantId}/users/{userId}/rotate-secret
     
     state RotatedState {
         [*] --> GracePeriodActive: 0 to 15 mins (Old secret valid_until = NOW() + 15m)
@@ -176,18 +231,18 @@ stateDiagram-v2
     end note
 ```
 
-1. **Rotation Trigger (`SecretRotationService.rotate`):**
-   When `POST /v1/admin/tenants/{tenantId}/rotate-secret` is called:
+1. **Rotation Trigger (`UserSecretRotationService.rotateUserSecret`):**
+   When `POST /v1/admin/tenants/{tenantId}/users/{userId}/rotate-secret` is called:
    - Expired grace-period rows (`valid_until <= NOW()`) are deleted.
    - The current active secret (`valid_until IS NULL`) is updated to `valid_until = Instant.now().plus(Duration.ofMinutes(15))`.
    - A fresh cryptographically secure 32-byte secret (Base64 URL-safe) is inserted with `valid_until = NULL`.
 
 2. **Immediate Cutover for New Issuances:**
-   - `POST /v1/turn-credentials` calls `findCurrentByRealm()` (`valid_until IS NULL`) and signs new credentials with the **new secret**.
+   - `POST /v1/turn-credentials` calls `findCurrentByRealmAndUserId()` (`valid_until IS NULL`) and signs new credentials with the **new secret**.
 
 3. **Dual-Secret Validation in Coturn (`psql-userdb`):**
    - Coturn queries Postgres for valid secrets (`valid_until IS NULL OR valid_until > NOW()`).
-   - During STUN/TURN allocation attempts, Coturn validates signatures against any active secret for the tenant realm.
+   - During STUN/TURN allocation attempts, Coturn validates signatures against any active secret for the tenant realm or specific `userId`.
 
 ---
 
@@ -242,3 +297,4 @@ See `docker-compose.prod.yml`:
 - Redis 7 (rate limiting)
 - Coturn cluster (`psql-userdb` reading Postgres through HAProxy)
 - N Credential Service Spring Boot instances (Java 21 virtual threads)
+
