@@ -36,7 +36,7 @@ services:
     restart: unless-stopped
 
   pg1:
-    image: patroni/patroni:latest
+    image: zalando/patroni:v3.2.2
     depends_on: [etcd1, etcd2, etcd3]
     environment:
       NODE_NAME: pg1
@@ -49,7 +49,7 @@ services:
     restart: unless-stopped
 
   pg2:
-    image: patroni/patroni:latest
+    image: zalando/patroni:v3.2.2
     depends_on: [etcd1, etcd2, etcd3]
     environment:
       NODE_NAME: pg2
@@ -62,7 +62,7 @@ services:
     restart: unless-stopped
 
   pg3:
-    image: patroni/patroni:latest
+    image: zalando/patroni:v3.2.2
     depends_on: [etcd1, etcd2, etcd3]
     environment:
       NODE_NAME: pg3
@@ -88,7 +88,7 @@ services:
     restart: unless-stopped
 
   coturn:
-    image: coturn/coturn:4.6
+    image: coturn/coturn:latest
     depends_on: [haproxy]
     environment:
       TURN_EXTERNAL_IP: ${TURN_EXTERNAL_IP:-127.0.0.1}
@@ -102,6 +102,7 @@ services:
     restart: unless-stopped
 
   app:
+    build: .
     image: k2iot/turn-credential-platform:latest
     depends_on: [haproxy, redis]
     environment:
