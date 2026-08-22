@@ -1,6 +1,8 @@
 # TURN Credential Platform
 
-Multi-tenant TURN REST API credential issuance service. Single data center, highly available within that DC.
+Multi-tenant TURN REST API credential issuance service.
+
+> The production Compose reference in this repository provides process/container-level HA on a **single Docker host**. It is not host-level or datacenter-level HA.
 
 ---
 
@@ -31,8 +33,8 @@ sequenceDiagram
 
     Note over Client, Coturn: Step 3: Media Connection
     Client->>Coturn: STUN/TURN allocate request (username, password)
-    Coturn->>DB: Read valid secrets (turn_secret WHERE valid_until IS NULL OR valid_until > NOW())
-    Coturn-->>Client: 200 OK (TURN Session Established)
+    Coturn->>DB: Read TURN REST API secrets for the realm
+    Coturn-->>Client: Allocation succeeds when the supplied credential validates
 
     Note over Admin, DB: Step 4: Secret Rotation (Grace Period)
     Admin->>API: POST /v1/admin/tenants/{tenantId}/rotate-secret (X-Admin-Api-Key)
@@ -85,7 +87,8 @@ curl -i -X POST http://localhost:8080/v1/turn-credentials \
         "userId": "user-42"
       }'
 ```
-*(Note: `userId` is optional. If omitted, a random UUID will be assigned automatically.)*
+
+`userId` is optional. If omitted, the application may assign one according to the API implementation.
 
 **Response (`200 OK`):**
 ```json
@@ -105,6 +108,8 @@ curl -i -X POST http://localhost:8080/v1/turn-credentials \
 - `401 Unauthorized`: Missing or invalid `X-Api-Key`, or tenant status is `SUSPENDED`.
 - `429 Too Many Requests`: Tenant exceeded its configured per-minute rate limit.
 
+> **TURNS note:** the application currently advertises a `turns:...:5349` URI, but the production Compose reference does not mount a certificate/private key for Coturn. Configure `cert`/`pkey` before relying on TURNS in a real deployment.
+
 ---
 
 ### 3. Register & Manage Per-UserId Secrets (Admin Endpoints)
@@ -112,36 +117,33 @@ curl -i -X POST http://localhost:8080/v1/turn-credentials \
 Pre-register specific `userId`s for a tenant and manage their dedicated TURN HMAC secrets.
 
 #### Register a User
-**Request:**
+
 ```bash
 curl -i -X POST http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/users \
   -H "X-Admin-Api-Key: dev-admin-key" \
   -H "Content-Type: application/json" \
   -d '{ "userId": "user-42" }'
 ```
-**Response (`201 Created`):**
-```json
-{
-  "userId": "user-42",
-  "tenantId": "c4a3b2a1-1234-4567-89ab-cdef01234567"
-}
-```
 
-#### Rotate a User's Secret (15-Minute Zero-Downtime Grace Period)
-**Request:**
+Expected response: `201 Created`.
+
+#### Rotate a User's Secret
+
 ```bash
 curl -i -X POST http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/users/user-42/rotate-secret \
   -H "X-Admin-Api-Key: dev-admin-key"
 ```
-**Response (`204 No Content`)** *(Returns `404 Not Found` if user is unregistered)*
+
+Expected response: `204 No Content` (`404 Not Found` for an unknown user).
 
 #### Deregister / Suspend a User
-**Request:**
+
 ```bash
 curl -i -X DELETE http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab-cdef01234567/users/user-42 \
   -H "X-Admin-Api-Key: dev-admin-key"
 ```
-**Response (`204 No Content`)** *(Subsequent credential requests for `user-42` will return `403 Forbidden`)*
+
+Expected response: `204 No Content`; subsequent issuance for that user is rejected.
 
 ---
 
@@ -154,7 +156,7 @@ curl -i -X DELETE http://localhost:8080/v1/admin/tenants/c4a3b2a1-1234-4567-89ab
 
 ## Automated End-to-End Testing Script
 
-An automated bash script is provided in [`scripts/verify-e2e.sh`](file:///home/vht/project/turn-credential-platform/scripts/verify-e2e.sh) to build the application, spin up the Docker stack, wait for healthiness, and execute the complete 9-step E2E API verification scenario.
+`scripts/verify-e2e.sh` builds/starts the selected Compose stack by default, waits for the API health endpoint, and executes the complete 9-step E2E API verification scenario.
 
 ### Running Default Local Compose Stack
 
@@ -162,19 +164,18 @@ An automated bash script is provided in [`scripts/verify-e2e.sh`](file:///home/v
 ./scripts/verify-e2e.sh
 ```
 
-### Running Production Multi-Node HA Topology Stack
+### Reusing an Already-Running Stack
 
-```bash
-COMPOSE_FILE=docker-compose.prod.yml ./scripts/verify-e2e.sh
-```
+The HA verifier calls the E2E suite with `SKIP_BUILD=1` and `SKIP_COMPOSE_UP=1` so the same production stack is tested before failover.
 
-### Automated Verifications Executed:
+### Automated Verifications Executed
+
 1. **Admin Tenant Onboarding** (`POST /v1/admin/tenants`) → `201 Created`
 2. **Unregistered User Enforcement** (`POST /v1/turn-credentials`) → `403 Forbidden`
 3. **Admin User Pre-Registration** (`POST /v1/admin/tenants/{tenantId}/users`) → `201 Created`
 4. **Registered User Credential Issuance** (`POST /v1/turn-credentials`) → `200 OK`
 5. **Admin User Secret Rotation** (`POST .../users/{userId}/rotate-secret`) → `204 No Content`
-6. **Post-Rotation Credential Issuance** → `200 OK` (verifies new HMAC password signature)
+6. **Post-Rotation Credential Issuance** → `200 OK`
 7. **Admin User Deregistration / Suspension** (`DELETE .../users/{userId}`) → `204 No Content`
 8. **Post-Deregistration Issuance Enforcement** → `403 Forbidden`
 9. **Unknown User Secret Rotation Error Handling** → `404 Not Found`
@@ -184,71 +185,39 @@ COMPOSE_FILE=docker-compose.prod.yml ./scripts/verify-e2e.sh
 ## Detailed Explanation: Tenant TURN Secret Rotation
 
 ### Overview & Multi-Row Schema Design
-In the TURN REST API standard (`use-auth-secret`), credentials (`username` + `password`) are signed statelessly using a shared per-tenant HMAC-SHA1 secret (`value`).
 
-When a tenant secret is rotated:
-1. **Without a grace period:** Wiping the old secret immediately breaks WebRTC clients whose credentials were issued right before rotation but haven't completed ICE candidate allocation yet.
-2. **With a multi-row grace period:** The application marks the previous secret to expire after a 15-minute window (`valid_until = NOW() + 15m`), and creates a new current secret (`valid_until IS NULL`). Coturn and the API read all valid secrets for the realm.
-
----
+The application stores multiple `turn_secret` rows so secret rotation can preserve a grace period rather than immediately deleting the prior secret.
 
 ### Data Model Structure (`turn_secret` table)
 
 | Column | Type | Description |
 |---|---|---|
-| `realm` | `VARCHAR(255)` | Tenant domain / realm (Part of Composite PK, FK to `tenants(realm)`). |
-| `value` | `VARCHAR(255)` | Shared secret string (Part of Composite PK). |
-| `user_id` | `VARCHAR(255)` | Nullable user ID (`NULL` = legacy realm secret; non-`NULL` = per-userId secret). |
-| `valid_until` | `TIMESTAMPTZ` | Nullable expiry timestamp. `NULL` = current active secret for new issuances. Non-`NULL` timestamp in future = grace-period secret. |
-| `created_at` | `TIMESTAMPTZ` | Creation timestamp (`now()`). |
+| `realm` | `VARCHAR(255)` | Tenant domain / realm; part of the composite primary key. |
+| `value` | `VARCHAR(255)` | Shared secret string; part of the composite primary key. |
+| `user_id` | `VARCHAR(255)` | Nullable application-level user binding. |
+| `valid_until` | `TIMESTAMPTZ` | Nullable application-level expiry/grace metadata. |
+| `created_at` | `TIMESTAMPTZ` | Creation timestamp. |
 
-**Primary Key:** `(realm, value)`  
-**Partial Unique Index:** `uq_turn_secret_current_realm` on `turn_secret(realm) WHERE user_id IS NULL AND valid_until IS NULL`  
-**Partial Unique Index:** `uq_turn_secret_current_user` on `turn_secret(realm, user_id) WHERE user_id IS NOT NULL AND valid_until IS NULL`  
+**Primary Key:** `(realm, value)`
 
----
+The application selects the current secret (`valid_until IS NULL`) for new credential issuance and rotates older rows into a grace window.
 
-### How Secret Rotation Works (Step-by-Step)
+### Important Coturn Compatibility Boundary
 
-```mermaid
-stateDiagram-v2
-    [*] --> CurrentSecret: Initial Onboarding (valid_until = NULL)
-    CurrentSecret --> RotatedState: POST /v1/admin/tenants/{tenantId}/users/{userId}/rotate-secret
-    
-    state RotatedState {
-        [*] --> GracePeriodActive: 0 to 15 mins (Old secret valid_until = NOW() + 15m)
-        GracePeriodActive --> GraceExpired: > 15 mins (Old secret valid_until <= NOW())
-    }
+Upstream Coturn's PostgreSQL driver retrieves TURN REST API shared secrets using a realm-only query equivalent to:
 
-    note right of GracePeriodActive
-        - New Credential Requests: Signed with new secret (valid_until IS NULL)
-        - Coturn Validation: Accepts credentials signed with current OR valid grace-period secret
-    end note
-
-    note right of GraceExpired
-        - Expired grace-period secret automatically cleaned up on next rotation
-        - Coturn ignores expired rows
-    end note
+```sql
+SELECT value FROM turn_secret WHERE realm = $1;
 ```
 
-1. **Rotation Trigger (`UserSecretRotationService.rotateUserSecret`):**
-   When `POST /v1/admin/tenants/{tenantId}/users/{userId}/rotate-secret` is called:
-   - Expired grace-period rows (`valid_until <= NOW()`) are deleted.
-   - The current active secret (`valid_until IS NULL`) is updated to `valid_until = Instant.now().plus(Duration.ofMinutes(15))`.
-   - A fresh cryptographically secure 32-byte secret (Base64 URL-safe) is inserted with `valid_until = NULL`.
+Coturn does **not** support a `userdb-user-secret-query` configuration directive. Consequently, this repository must not claim that upstream Coturn itself enforces the application's `user_id` or `valid_until` columns. That per-user/expiry compatibility gap is a separate correctness/hardening workstream and is **not solved by the HA PR**.
 
-2. **Immediate Cutover for New Issuances:**
-   - `POST /v1/turn-credentials` calls `findCurrentByRealmAndUserId()` (`valid_until IS NULL`) and signs new credentials with the **new secret**.
-
-3. **Dual-Secret Validation in Coturn (`psql-userdb`):**
-   - Coturn queries Postgres for valid secrets (`valid_until IS NULL OR valid_until > NOW()`).
-   - During STUN/TURN allocation attempts, Coturn validates signatures against any active secret for the tenant realm or specific `userId`.
+Credential usernames still carry their TURN REST API expiration timestamp, which is a separate protocol-level expiry mechanism.
 
 ---
 
-## Client Integration Examples
+## Client Integration Example
 
-### WebRTC Client (`RTCPeerConnection`)
 ```javascript
 const turnResponse = await fetch('https://api.yourplatform.com/v1/turn-credentials', {
   method: 'POST',
@@ -260,41 +229,274 @@ const turnResponse = await fetch('https://api.yourplatform.com/v1/turn-credentia
 }).then(res => res.json());
 
 const pc = new RTCPeerConnection({
-  iceServers: [
-    {
-      urls: turnResponse.uris,
-      username: turnResponse.username,
-      credential: turnResponse.password
-    }
-  ]
+  iceServers: [{
+    urls: turnResponse.uris,
+    username: turnResponse.username,
+    credential: turnResponse.password
+  }]
 });
-```
-
-### Manual Verification via `turnutils_uclient`
-```bash
-turnutils_uclient -u "1755700000:user-42" -w "dGhpcyBpcyBhIHZhbGlk..." -p 3478 localhost
 ```
 
 ---
 
 ## Local Development
 
-Start Postgres, Redis, Coturn, and the Spring Boot application locally via Docker Compose:
+```bash
+./mvnw clean package -DskipTests
+docker compose up -d --build
+```
+
+Run unit tests with:
 
 ```bash
-mvn clean package -DskipTests
-docker compose up -d --build
+./mvnw test
 ```
 
 ---
 
-## Production Topology
+## Production HA Topology
 
-See `docker-compose.prod.yml`:
-- 3-node etcd cluster (Patroni DCS)
-- 3-node Patroni-managed Postgres cluster (1 leader, 1 sync replica, 1 async replica)
-- HAProxy fronting Postgres (routes writes & reads to current Patroni leader via `/leader` healthcheck on port 8008)
-- Redis 7 (rate limiting)
-- Coturn cluster (`psql-userdb` reading Postgres through HAProxy)
-- N Credential Service Spring Boot instances (Java 21 virtual threads)
+`docker-compose.prod.yml` contains the CI reference deployment:
 
+- 3-node etcd 3.5.x quorum used as the Patroni DCS.
+- 3 PostgreSQL 16 nodes managed by Patroni.
+- Synchronous replication with one synchronous standby plus a third replica.
+- DB HAProxy on internal port `5000`, routing only to the Patroni node whose `GET /primary` endpoint returns HTTP 200.
+- 3 explicit Spring Boot services: `app1`, `app2`, `app3`.
+- API HAProxy as the sole host publisher of `8080:8080`, with `/actuator/health` checks and retry redispatch on backend connection failure.
+- Redis 7 with AOF persistence, but still a standalone process/SPOF.
+- One Coturn instance using PostgreSQL through `db-haproxy:5000`.
+
+```text
+                         :8080
+Client/API ───────► api-haproxy
+                    /    |    \
+                  app1  app2  app3
+                    \    |    /
+                     db-haproxy:5000
+                       /    |    \
+                     pg1   pg2   pg3
+                      |     |     |
+                   Patroni Patroni Patroni
+                      \     |     /
+                      etcd1 etcd2 etcd3
+
+Coturn ─────────────► db-haproxy:5000
+```
+
+### HA Boundary
+
+This is **single-host process/container HA**. Losing the Docker host still loses the complete topology. Production host/node HA requires spreading the same roles across independent hosts with Kubernetes or another orchestrator.
+
+The following are not redundant in this Compose reference:
+
+- Redis is standalone.
+- Coturn is a single instance.
+- API HAProxy and DB HAProxy are each single instances on the same Docker host.
+
+Internal TLS/mTLS, Redis Sentinel/Cluster, multiple Coturn instances, cross-host scheduling, and PostgreSQL backup/PITR are separate hardening workstreams.
+
+## Running Production Docker Compose
+
+The production Compose file is intentionally **fail-closed**. It will refuse to render if required deployment variables are missing, so prepare the environment before running `docker compose`.
+
+### 1. Prerequisites
+
+Install:
+
+- Docker Engine with Docker Compose v2 (`docker compose`).
+- `curl` for HTTP health checks.
+- Java 21 + Maven wrapper support only if you plan to run `./scripts/verify-ha.sh` directly on the host.
+
+The host must allow the published ports required by this reference stack:
+
+| Port | Protocol | Purpose |
+|---|---|---|
+| `8080` | TCP | Credential API through API HAProxy |
+| `3478` | UDP/TCP | TURN/STUN |
+| `5349` | TCP | TURNS listener; certificate/key still required before real TURNS use |
+
+PostgreSQL, Patroni REST, etcd, Redis, and DB HAProxy ports remain internal to the Compose network.
+
+### 2. Configure Production Environment
+
+Create a local `.env` file in the repository root. `.env` is already ignored by Git and must never be committed.
+
+```bash
+cat > .env <<'EOF'
+POSTGRES_SUPERUSER_PASSWORD=replace-with-a-strong-postgres-superuser-password
+REPLICATOR_PASSWORD=replace-with-a-strong-replication-password
+POSTGRES_APP_DB=turncred
+POSTGRES_APP_USER=turncred
+POSTGRES_APP_PASSWORD=replace-with-a-strong-application-db-password
+TURN_ADMIN_API_KEY=replace-with-a-long-random-admin-api-key
+TURN_EXTERNAL_IP=203.0.113.10
+TURN_PLATFORM_DOMAIN=turn.example.com
+EOF
+
+chmod 600 .env
+```
+
+Required variables:
+
+| Variable | Description |
+|---|---|
+| `POSTGRES_SUPERUSER_PASSWORD` | PostgreSQL/Patroni superuser password |
+| `REPLICATOR_PASSWORD` | Patroni streaming-replication password |
+| `POSTGRES_APP_DB` | Application database name |
+| `POSTGRES_APP_USER` | Application/Coturn PostgreSQL role |
+| `POSTGRES_APP_PASSWORD` | Application/Coturn PostgreSQL password |
+| `TURN_ADMIN_API_KEY` | Admin API credential used by `/v1/admin/**` |
+| `TURN_EXTERNAL_IP` | Public IP advertised by Coturn for relayed traffic |
+| `TURN_PLATFORM_DOMAIN` | Domain suffix used when generating tenant TURN realms |
+
+Use actual deployment secrets and the real public TURN IP/domain. Do not copy CI credentials into a production environment.
+
+GitHub Actions injects explicit CI-only values for these variables. Those values live in the workflow test environment and are not defaults in the production Compose file.
+
+### 3. Validate Before Starting
+
+Confirm every required variable is present and the Compose model renders successfully:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml config -q
+./scripts/verify-ha.sh --static-only
+```
+
+The first command catches missing environment values or invalid Compose configuration. The second validates repository HA topology/config contracts without starting the stack.
+
+### 4. Build and Start Production Stack
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml up -d --build
+```
+
+Initial startup can take longer because the three-node Patroni cluster must bootstrap, replicas must join, and the Spring Boot instances wait for their dependencies.
+
+### 5. Check Status and Health
+
+Show container status:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml ps
+```
+
+Check the public API health endpoint:
+
+```bash
+curl -fsS http://localhost:8080/actuator/health
+```
+
+Inspect the current PostgreSQL primary from the three Patroni nodes:
+
+```bash
+for node in pg1 pg2 pg3; do
+  printf '%s: ' "$node"
+  docker compose --env-file .env -f docker-compose.prod.yml exec -T "$node" \
+    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8008/primary
+done
+```
+
+Exactly one node should return HTTP `200`; the other nodes should not report themselves as primary.
+
+### 6. View Logs
+
+All services:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml logs -f --tail=200
+```
+
+Common focused views:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml logs -f pg1 pg2 pg3
+docker compose --env-file .env -f docker-compose.prod.yml logs -f db-haproxy api-haproxy
+docker compose --env-file .env -f docker-compose.prod.yml logs -f app1 app2 app3
+docker compose --env-file .env -f docker-compose.prod.yml logs -f coturn
+```
+
+### 7. Restart or Stop Without Deleting Data
+
+Restart one service:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml restart app1
+```
+
+Stop/remove containers and network while preserving named volumes:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml down
+```
+
+Start the stack again with the same persisted PostgreSQL/etcd/Redis volumes:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml up -d
+```
+
+### 8. Destructive Reset
+
+> **Warning:** this permanently removes the Compose named volumes, including PostgreSQL data, etcd state, and Redis AOF data. Use only when intentionally rebuilding the environment from scratch.
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml down -v --remove-orphans
+```
+
+Then bootstrap a fresh stack:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml up -d --build
+```
+
+### 9. Run the Complete HA Acceptance Test
+
+The same full acceptance flow used by CI can be run locally with the production environment exported from `.env`:
+
+```bash
+set -a
+. ./.env
+set +a
+./scripts/verify-ha.sh
+```
+
+`verify-ha.sh` is intentionally destructive to its own Compose test stack: it performs a clean `down -v`, starts a fresh topology, stops the active PostgreSQL primary to prove failover, restarts it, and stops `app1` to prove application redundancy. Do **not** run this command against a production deployment containing data you need to preserve.
+
+It verifies:
+
+1. Three healthy etcd members.
+2. One Patroni primary and two replicas.
+3. PostgreSQL access through DB HAProxy.
+4. A replication marker reaches both replicas.
+5. Three healthy Spring Boot instances and API HAProxy.
+6. All 9 API E2E cases through API HAProxy.
+7. Stopping the current PostgreSQL primary promotes a different node.
+8. Committed data survives and the Spring application can write after failover.
+9. The former primary rejoins and catches up as a replica.
+10. Stopping `app1` does not make the API unavailable.
+11. Restarting `app1` restores three healthy application instances.
+
+---
+
+## Coturn Production Notes
+
+The production Compose file pins Coturn instead of using `latest` and routes its PostgreSQL connection through `db-haproxy:5000`. Database credentials are injected by Compose at runtime rather than stored in `turnserver.prod.conf`.
+
+`turnserver.prod.conf` deliberately does not contain the unsupported `userdb-user-secret-query`, `no-tlsv1`, or `no-tlsv1_1` directives.
+
+### TURNS / 5349
+
+The reference config declares port 5349 but does not provision `cert`/`pkey` files. Production TURNS requires certificate/private-key mounts and corresponding Coturn configuration before clients should rely on the `turns:` URI.
+
+---
+
+## CI
+
+`.github/workflows/ci.yml` runs:
+
+- `test` — Maven unit tests plus a package build.
+- `ha-static-contract` — static topology/config/documentation contracts and rendered Compose validation.
+- `ha-integration` — clean production topology, E2E, PostgreSQL failover/data survival/rejoin, and application redundancy.
+
+The 9-case E2E suite currently runs inside `ha-integration`; it is not a separate GitHub Actions job.

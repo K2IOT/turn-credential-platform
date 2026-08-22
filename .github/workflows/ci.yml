@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - feat/production-ha-patroni
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Run unit tests
+        run: ./mvnw -B test
+
+      - name: Verify package build
+        run: ./mvnw -B package -DskipTests
+
+  ha-static-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      POSTGRES_SUPERUSER_PASSWORD: ci-postgres-secret
+      REPLICATOR_PASSWORD: ci-replicator-secret
+      POSTGRES_APP_DB: turncred
+      POSTGRES_APP_USER: turncred
+      POSTGRES_APP_PASSWORD: ci-app-secret
+      TURN_ADMIN_API_KEY: ci-admin-key
+      TURN_EXTERNAL_IP: 127.0.0.1
+      TURN_PLATFORM_DOMAIN: yourplatform.com
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Verify production HA topology contract
+        run: bash scripts/verify-ha.sh --static-only
+
+      - name: Validate rendered Compose configuration
+        run: docker compose -f docker-compose.prod.yml config -q
+
+      - name: Verify pre-merge production contracts
+        run: |
+          grep -Eq 'option[[:space:]]+redispatch[[:space:]]+1' haproxy/api-haproxy.cfg
+          grep -Eq 'image:[[:space:]]+coturn/coturn:4\.17\.2-r0' docker-compose.prod.yml
+          grep -Eq -- '--psql-userdb=host=db-haproxy[[:space:]]+port=5000' docker-compose.prod.yml
+          if grep -Eq '^[[:space:]]*psql-userdb=' coturn/turnserver.prod.conf; then
+            echo 'Coturn production config must not embed database credentials; Compose injects psql-userdb at runtime' >&2
+            exit 1
+          fi
+          if grep -Eq '^[[:space:]]*(userdb-user-secret-query|no-tlsv1|no-tlsv1_1)(=|[[:space:]]*$)' coturn/turnserver.prod.conf; then
+            echo 'Unsupported Coturn production directive detected' >&2
+            exit 1
+          fi
+          if grep -Fq ':-' docker-compose.prod.yml; then
+            echo 'Production Compose must fail closed instead of providing environment fallbacks' >&2
+            exit 1
+          fi
+          grep -Eq '^[[:space:]]+log[[:space:]]+stdout[[:space:]]+format[[:space:]]+raw[[:space:]]+local0' haproxy/haproxy.cfg
+          grep -Eq '^[[:space:]]+log[[:space:]]+stdout[[:space:]]+format[[:space:]]+raw[[:space:]]+local0' haproxy/api-haproxy.cfg
+          checkout_v5_count="$(grep -Ec 'uses:[[:space:]]+actions/checkout@v5' .github/workflows/ci.yml)"
+          if [[ "$checkout_v5_count" -ne 3 ]]; then
+            echo "Expected all 3 checkout steps to use actions/checkout@v5, found ${checkout_v5_count}" >&2
+            exit 1
+          fi
+          grep -Fq './scripts/verify-ha.sh' README.md
+          grep -Fq 'single Docker host' README.md
+          grep -Fq 'Redis is standalone' README.md
+          grep -Fq 'Coturn is a single instance' README.md
+          if grep -Fq '/leader' README.md; then
+            echo 'README still documents the obsolete Patroni /leader check' >&2
+            exit 1
+          fi
+          if grep -Fq 'Coturn cluster' README.md; then
+            echo 'README incorrectly claims Coturn redundancy' >&2
+            exit 1
+          fi
+          if grep -Fq 'CI may use deterministic non-secret fallback values' docs/superpowers/specs/2026-08-22-production-ha-compose-design.md; then
+            echo 'HA design spec still documents fallback credentials instead of fail-closed production configuration' >&2
+            exit 1
+          fi
+
+  ha-integration:
+    needs:
+      - test
+      - ha-static-contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      POSTGRES_SUPERUSER_PASSWORD: ci-postgres-secret
+      REPLICATOR_PASSWORD: ci-replicator-secret
+      POSTGRES_APP_DB: turncred
+      POSTGRES_APP_USER: turncred
+      POSTGRES_APP_PASSWORD: ci-app-secret
+      TURN_ADMIN_API_KEY: ci-admin-key
+      TURN_EXTERNAL_IP: 127.0.0.1
+      TURN_PLATFORM_DOMAIN: yourplatform.com
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Run production HA acceptance
+        run: bash scripts/verify-ha.sh
+
+      - name: Upload HA diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha-compose-diagnostics
+          path: ha-compose.log
+          if-no-files-found: warn
+          retention-days: 7

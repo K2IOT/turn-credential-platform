@@ -1,10 +1,8 @@
 scope: turncred-cluster
 namespace: /turncred/
-name: ${NODE_NAME}
 
 restapi:
   listen: 0.0.0.0:8008
-  connect_address: ${NODE_IP}:8008
 
 etcd3:
   hosts: etcd1:2379,etcd2:2379,etcd3:2379
@@ -16,37 +14,43 @@ bootstrap:
     retry_timeout: 10
     maximum_lag_on_failover: 1048576
     synchronous_mode: true
+    synchronous_node_count: 1
     postgresql:
       use_pg_rewind: true
+      use_slots: true
       parameters:
         max_connections: 200
         wal_level: replica
         hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_keep_size: 256MB
+        password_encryption: scram-sha-256
 
   initdb:
     - encoding: UTF8
     - data-checksums
 
   pg_hba:
-    - host replication replicator 0.0.0.0/0 md5
-    - host all all 0.0.0.0/0 md5
+    - local all all trust
+    - host replication replicator 0.0.0.0/0 scram-sha-256
+    - host all all 0.0.0.0/0 scram-sha-256
+
+  post_bootstrap: /usr/local/bin/post-bootstrap.sh
 
 postgresql:
   listen: 0.0.0.0:5432
-  connect_address: ${NODE_IP}:5432
   data_dir: /var/lib/postgresql/data
   authentication:
     replication:
       username: replicator
-      password: ${REPLICATOR_PASSWORD}
     superuser:
       username: postgres
-      password: ${POSTGRES_SUPERUSER_PASSWORD}
-
   parameters:
-    unix_socket_directories: "."
+    unix_socket_directories: /var/run/postgresql
 
 tags:
   nofailover: false
   noloadbalance: false
   clonefrom: false
+  nosync: false
