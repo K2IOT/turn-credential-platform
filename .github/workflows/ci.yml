@@ -53,6 +53,16 @@ jobs:
             echo 'Unsupported Coturn production directive detected' >&2
             exit 1
           fi
+          if grep -Fq ':-' docker-compose.prod.yml; then
+            echo 'Production Compose must fail closed instead of providing environment fallbacks' >&2
+            exit 1
+          fi
+          grep -Eq '^[[:space:]]+log[[:space:]]+stdout[[:space:]]+format[[:space:]]+raw[[:space:]]+local0' haproxy/haproxy.cfg
+          grep -Eq '^[[:space:]]+log[[:space:]]+stdout[[:space:]]+format[[:space:]]+raw[[:space:]]+local0' haproxy/api-haproxy.cfg
+          if grep -Fq 'actions/checkout@v4' .github/workflows/ci.yml; then
+            echo 'actions/checkout@v4 still targets deprecated Node 20 runtime' >&2
+            exit 1
+          fi
           grep -Fq './scripts/verify-ha.sh' README.md
           grep -Fq 'single Docker host' README.md
           grep -Fq 'Redis is standalone' README.md
