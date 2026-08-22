@@ -192,7 +192,7 @@ services:
     restart: unless-stopped
 
   coturn:
-    image: coturn/coturn:latest
+    image: coturn/coturn:4.17.2-r0
     depends_on:
       db-haproxy:
         condition: service_started
