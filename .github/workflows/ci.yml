@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Java 21
         uses: actions/setup-java@v5
@@ -34,9 +34,18 @@ jobs:
   ha-static-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      POSTGRES_SUPERUSER_PASSWORD: ci-postgres-secret
+      REPLICATOR_PASSWORD: ci-replicator-secret
+      POSTGRES_APP_DB: turncred
+      POSTGRES_APP_USER: turncred
+      POSTGRES_APP_PASSWORD: ci-app-secret
+      TURN_ADMIN_API_KEY: ci-admin-key
+      TURN_EXTERNAL_IP: 127.0.0.1
+      TURN_PLATFORM_DOMAIN: yourplatform.com
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Verify production HA topology contract
         run: bash scripts/verify-ha.sh --static-only
@@ -87,12 +96,13 @@ jobs:
       REPLICATOR_PASSWORD: ci-replicator-secret
       POSTGRES_APP_DB: turncred
       POSTGRES_APP_USER: turncred
-      POSTGRES_APP_PASSWORD: turncred
-      TURN_ADMIN_API_KEY: dev-admin-key
+      POSTGRES_APP_PASSWORD: ci-app-secret
+      TURN_ADMIN_API_KEY: ci-admin-key
       TURN_EXTERNAL_IP: 127.0.0.1
+      TURN_PLATFORM_DOMAIN: yourplatform.com
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Java 21
         uses: actions/setup-java@v5
