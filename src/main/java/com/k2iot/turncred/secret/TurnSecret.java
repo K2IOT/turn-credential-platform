@@ -23,34 +23,25 @@ public class TurnSecret {
 
     public TurnSecret(TurnSecretId id) {
         this.id = id;
-        if (id != null) {
-            this.userId = id.getUserId();
-        }
+    }
+
+    public TurnSecret(TurnSecretId id, String userId) {
+        this.id = id;
+        this.userId = userId;
     }
 
     public TurnSecretId getId() {
-        if (id != null && id.getUserId() == null && userId != null) {
-            id.setUserId(userId);
-        }
         return id;
     }
 
     public void setId(TurnSecretId id) {
         this.id = id;
-        if (id != null) {
-            this.userId = id.getUserId();
-        }
     }
 
     public String getRealm() { return id != null ? id.getRealm() : null; }
     public String getValue() { return id != null ? id.getValue() : null; }
-    public String getUserId() { return userId; } // null for realm-level secrets
-    public void setUserId(String userId) {
-        this.userId = userId;
-        if (this.id != null) {
-            this.id.setUserId(userId);
-        }
-    }
+    public String getUserId() { return userId; }
+    public void setUserId(String userId) { this.userId = userId; }
 
     public Instant getValidUntil() { return validUntil; }
     public void setValidUntil(Instant validUntil) { this.validUntil = validUntil; }

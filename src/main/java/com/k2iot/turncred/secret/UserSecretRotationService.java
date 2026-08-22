@@ -31,7 +31,7 @@ public class UserSecretRotationService {
         TenantUser user = new TenantUser(tenantId, userId);
         tenantUserRepository.save(user);
 
-        TurnSecret secret = new TurnSecret(new TurnSecretId(realm, userId, generateSecret()));
+        TurnSecret secret = new TurnSecret(new TurnSecretId(realm, generateSecret()), userId);
         secretRepository.save(secret);
     }
 
@@ -41,13 +41,12 @@ public class UserSecretRotationService {
         secretRepository.deleteExpiredForRealmAndUserId(realm, userId);
 
         TurnSecret current = secretRepository.findCurrentByRealmAndUserId(realm, userId)
-                .orElseThrow(() -> new IllegalStateException(
-                        "No current secret for user " + userId + " in realm " + realm));
+                .orElseThrow(() -> new IllegalArgumentException("User not found: " + userId));
         current.setValidUntil(Instant.now().plus(graceWindow));
         secretRepository.save(current);
         secretRepository.flush();
 
-        TurnSecret next = new TurnSecret(new TurnSecretId(realm, userId, generateSecret()));
+        TurnSecret next = new TurnSecret(new TurnSecretId(realm, generateSecret()), userId);
         secretRepository.save(next);
     }
 

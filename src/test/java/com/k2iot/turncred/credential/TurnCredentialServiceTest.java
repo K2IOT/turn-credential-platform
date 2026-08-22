@@ -40,7 +40,7 @@ class TurnCredentialServiceTest {
     void issuesCredentialSignedWithUserSecret() {
         Tenant tenant = tenantWithRealm("acme.turn.yourplatform.com");
         TenantUser activeUser = new TenantUser(tenant.getId(), "user-42");
-        TurnSecret secret = new TurnSecret(new TurnSecretId(tenant.getRealm(), "user-42", "super-secret"));
+        TurnSecret secret = new TurnSecret(new TurnSecretId(tenant.getRealm(), "super-secret"), "user-42");
 
         when(rateLimiter.tryAcquire(tenant.getId(), 600)).thenReturn(true);
         when(tenantUserRepository.findByTenantIdAndUserId(tenant.getId(), "user-42"))

@@ -74,9 +74,20 @@ class TenantUserAdminControllerTest {
     @Test
     void deregisterUser_callsDeregister() {
         UUID tenantId = UUID.randomUUID();
+        when(tenantRepository.findById(tenantId))
+                .thenReturn(Optional.of(tenantWithRealm(tenantId, "acme.turn.com")));
 
         controller.deregisterUser(tenantId, "alice");
 
         verify(userSecretRotationService).deregisterUser(tenantId, "alice");
+    }
+
+    @Test
+    void deregisterUser_throwsNotFoundWhenTenantMissing() {
+        UUID tenantId = UUID.randomUUID();
+        when(tenantRepository.findById(tenantId)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> controller.deregisterUser(tenantId, "alice"))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

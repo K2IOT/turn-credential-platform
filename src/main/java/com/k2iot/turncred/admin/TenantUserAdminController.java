@@ -48,6 +48,8 @@ public class TenantUserAdminController {
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void deregisterUser(@PathVariable UUID tenantId,
                                 @PathVariable String userId) {
+        tenantRepository.findById(tenantId)
+                .orElseThrow(() -> new IllegalArgumentException("Tenant not found: " + tenantId));
         userSecretRotationService.deregisterUser(tenantId, userId);
     }
 }

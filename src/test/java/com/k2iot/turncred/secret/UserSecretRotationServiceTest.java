@@ -55,7 +55,7 @@ class UserSecretRotationServiceTest {
 
     @Test
     void rotateUserSecret_expiresCurrent_andInsertsNewCurrent() {
-        TurnSecret current = new TurnSecret(new TurnSecretId("acme.turn.com", "alice", "old-secret"));
+        TurnSecret current = new TurnSecret(new TurnSecretId("acme.turn.com", "old-secret"), "alice");
         when(secretRepository.findCurrentByRealmAndUserId("acme.turn.com", "alice"))
                 .thenReturn(Optional.of(current));
 
@@ -80,7 +80,7 @@ class UserSecretRotationServiceTest {
                 .thenReturn(Optional.empty());
 
         assertThatThrownBy(() -> service.rotateUserSecret("realm.com", "bob", Duration.ofMinutes(15)))
-                .isInstanceOf(IllegalStateException.class)
+                .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("bob");
     }
 
