@@ -296,9 +296,9 @@ The following are not redundant in this Compose reference:
 
 Internal TLS/mTLS, Redis Sentinel/Cluster, multiple Coturn instances, cross-host scheduling, and PostgreSQL backup/PITR are separate hardening workstreams.
 
-### Required Production Overrides
+### Required Production Environment
 
-CI intentionally uses deterministic fallback values so pull requests can bootstrap. Real deployments must override at least:
+`docker-compose.prod.yml` is fail-closed: it does not provide fallback values for deployment-specific database credentials, admin credentials, TURN address, or platform domain. A real deployment must set all of the following before Compose is rendered or started:
 
 ```text
 POSTGRES_SUPERUSER_PASSWORD
@@ -310,6 +310,8 @@ TURN_ADMIN_API_KEY
 TURN_EXTERNAL_IP
 TURN_PLATFORM_DOMAIN
 ```
+
+GitHub Actions injects explicit CI-only values for these variables. Those values live in the workflow test environment and are not defaults in the production Compose file.
 
 ### Start the Reference Stack
 
