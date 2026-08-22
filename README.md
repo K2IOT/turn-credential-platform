@@ -296,36 +296,172 @@ The following are not redundant in this Compose reference:
 
 Internal TLS/mTLS, Redis Sentinel/Cluster, multiple Coturn instances, cross-host scheduling, and PostgreSQL backup/PITR are separate hardening workstreams.
 
-### Required Production Environment
+## Running Production Docker Compose
 
-`docker-compose.prod.yml` is fail-closed: it does not provide fallback values for deployment-specific database credentials, admin credentials, TURN address, or platform domain. A real deployment must set all of the following before Compose is rendered or started:
+The production Compose file is intentionally **fail-closed**. It will refuse to render if required deployment variables are missing, so prepare the environment before running `docker compose`.
 
-```text
-POSTGRES_SUPERUSER_PASSWORD
-REPLICATOR_PASSWORD
-POSTGRES_APP_DB
-POSTGRES_APP_USER
-POSTGRES_APP_PASSWORD
-TURN_ADMIN_API_KEY
-TURN_EXTERNAL_IP
-TURN_PLATFORM_DOMAIN
+### 1. Prerequisites
+
+Install:
+
+- Docker Engine with Docker Compose v2 (`docker compose`).
+- `curl` for HTTP health checks.
+- Java 21 + Maven wrapper support only if you plan to run `./scripts/verify-ha.sh` directly on the host.
+
+The host must allow the published ports required by this reference stack:
+
+| Port | Protocol | Purpose |
+|---|---|---|
+| `8080` | TCP | Credential API through API HAProxy |
+| `3478` | UDP/TCP | TURN/STUN |
+| `5349` | TCP | TURNS listener; certificate/key still required before real TURNS use |
+
+PostgreSQL, Patroni REST, etcd, Redis, and DB HAProxy ports remain internal to the Compose network.
+
+### 2. Configure Production Environment
+
+Create a local `.env` file in the repository root. `.env` is already ignored by Git and must never be committed.
+
+```bash
+cat > .env <<'EOF'
+POSTGRES_SUPERUSER_PASSWORD=replace-with-a-strong-postgres-superuser-password
+REPLICATOR_PASSWORD=replace-with-a-strong-replication-password
+POSTGRES_APP_DB=turncred
+POSTGRES_APP_USER=turncred
+POSTGRES_APP_PASSWORD=replace-with-a-strong-application-db-password
+TURN_ADMIN_API_KEY=replace-with-a-long-random-admin-api-key
+TURN_EXTERNAL_IP=203.0.113.10
+TURN_PLATFORM_DOMAIN=turn.example.com
+EOF
+
+chmod 600 .env
 ```
+
+Required variables:
+
+| Variable | Description |
+|---|---|
+| `POSTGRES_SUPERUSER_PASSWORD` | PostgreSQL/Patroni superuser password |
+| `REPLICATOR_PASSWORD` | Patroni streaming-replication password |
+| `POSTGRES_APP_DB` | Application database name |
+| `POSTGRES_APP_USER` | Application/Coturn PostgreSQL role |
+| `POSTGRES_APP_PASSWORD` | Application/Coturn PostgreSQL password |
+| `TURN_ADMIN_API_KEY` | Admin API credential used by `/v1/admin/**` |
+| `TURN_EXTERNAL_IP` | Public IP advertised by Coturn for relayed traffic |
+| `TURN_PLATFORM_DOMAIN` | Domain suffix used when generating tenant TURN realms |
+
+Use actual deployment secrets and the real public TURN IP/domain. Do not copy CI credentials into a production environment.
 
 GitHub Actions injects explicit CI-only values for these variables. Those values live in the workflow test environment and are not defaults in the production Compose file.
 
-### Start the Reference Stack
+### 3. Validate Before Starting
+
+Confirm every required variable is present and the Compose model renders successfully:
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env -f docker-compose.prod.yml config -q
+./scripts/verify-ha.sh --static-only
 ```
 
-### Verify the Complete HA Contract
+The first command catches missing environment values or invalid Compose configuration. The second validates repository HA topology/config contracts without starting the stack.
 
-Run the same acceptance command used in CI:
+### 4. Build and Start Production Stack
 
 ```bash
+docker compose --env-file .env -f docker-compose.prod.yml up -d --build
+```
+
+Initial startup can take longer because the three-node Patroni cluster must bootstrap, replicas must join, and the Spring Boot instances wait for their dependencies.
+
+### 5. Check Status and Health
+
+Show container status:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml ps
+```
+
+Check the public API health endpoint:
+
+```bash
+curl -fsS http://localhost:8080/actuator/health
+```
+
+Inspect the current PostgreSQL primary from the three Patroni nodes:
+
+```bash
+for node in pg1 pg2 pg3; do
+  printf '%s: ' "$node"
+  docker compose --env-file .env -f docker-compose.prod.yml exec -T "$node" \
+    curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8008/primary
+done
+```
+
+Exactly one node should return HTTP `200`; the other nodes should not report themselves as primary.
+
+### 6. View Logs
+
+All services:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml logs -f --tail=200
+```
+
+Common focused views:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml logs -f pg1 pg2 pg3
+docker compose --env-file .env -f docker-compose.prod.yml logs -f db-haproxy api-haproxy
+docker compose --env-file .env -f docker-compose.prod.yml logs -f app1 app2 app3
+docker compose --env-file .env -f docker-compose.prod.yml logs -f coturn
+```
+
+### 7. Restart or Stop Without Deleting Data
+
+Restart one service:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml restart app1
+```
+
+Stop/remove containers and network while preserving named volumes:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml down
+```
+
+Start the stack again with the same persisted PostgreSQL/etcd/Redis volumes:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml up -d
+```
+
+### 8. Destructive Reset
+
+> **Warning:** this permanently removes the Compose named volumes, including PostgreSQL data, etcd state, and Redis AOF data. Use only when intentionally rebuilding the environment from scratch.
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml down -v --remove-orphans
+```
+
+Then bootstrap a fresh stack:
+
+```bash
+docker compose --env-file .env -f docker-compose.prod.yml up -d --build
+```
+
+### 9. Run the Complete HA Acceptance Test
+
+The same full acceptance flow used by CI can be run locally with the production environment exported from `.env`:
+
+```bash
+set -a
+. ./.env
+set +a
 ./scripts/verify-ha.sh
 ```
+
+`verify-ha.sh` is intentionally destructive to its own Compose test stack: it performs a clean `down -v`, starts a fresh topology, stops the active PostgreSQL primary to prove failover, restarts it, and stops `app1` to prove application redundancy. Do **not** run this command against a production deployment containing data you need to preserve.
 
 It verifies:
 
@@ -341,18 +477,11 @@ It verifies:
 10. Stopping `app1` does not make the API unavailable.
 11. Restarting `app1` restores three healthy application instances.
 
-Static-only checks:
-
-```bash
-./scripts/verify-ha.sh --static-only
-docker compose -f docker-compose.prod.yml config -q
-```
-
 ---
 
 ## Coturn Production Notes
 
-The production Compose file pins Coturn instead of using `latest` and routes its PostgreSQL connection through `db-haproxy:5000`.
+The production Compose file pins Coturn instead of using `latest` and routes its PostgreSQL connection through `db-haproxy:5000`. Database credentials are injected by Compose at runtime rather than stored in `turnserver.prod.conf`.
 
 `turnserver.prod.conf` deliberately does not contain the unsupported `userdb-user-secret-query`, `no-tlsv1`, or `no-tlsv1_1` directives.
 
